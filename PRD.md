@@ -18,20 +18,26 @@
 - 插件应能够拦截特定域名的 HTTP/HTTPS 请求
 - 支持配置多个目标域名
 - 支持精确匹配和通配符匹配（如 `*.example.com`）
+- 当请求域名未命中 `domains` 配置时，插件必须完全 bypass：不执行 API Key 校验、不执行并发限流、不执行 Token 统计，也不改写请求或响应
 
 #### 2.1.2 API Key 识别
-- 从 HTTP 请求头中提取 API Key
-- 默认 Header 名称：`X-API-Key`
-- 支持自定义 Header 名称配置
-- 处理缺失 API Key 的情况
+- 从 HTTP 请求头 `Authorization` 中提取 API Key
+- 首版仅支持 `Authorization: Bearer <api_key>` 格式
+- 当 `Authorization` 头缺失、为空、格式非法，或 Bearer token 为空时，直接拒绝请求，不进入 `default` 配置
+- API Key 提取成功但未在 `rate_limits` 中显式配置时，同样直接拒绝请求，不进入 `default` 配置
+- `default` 配置仅用于文档保留的兼容扩展位；首版实现中不得用于兜底放行未显式配置的 API Key
 
-#### 2.1.3 真实并发数限制
+#### 2.1.3 真实并发数限制（支持分布式共享计数）
 - 限制的是同一时刻正在处理中的请求数量（in-flight requests），而非 QPS 或速率
+- 首版必须支持跨多个 Envoy 实例共享并发计数，确保同一 API Key 在多副本部署下执行全局并发限制，而非单实例局部限制
+- 分布式计数能力采用可插拔存储设计，但首版必须交付可用的 Redis 后端实现作为默认分布式共享计数方案；实现上仍不应将存储层与插件主逻辑强耦合，便于后续替换为其他外部状态存储
 - 工作原理：
-  - 请求到达时：检查该 API Key 当前 in-flight 计数，若 < max_concurrent 则放行并计数 +1，否则拒绝
-  - 请求完成时（收到响应或连接断开）：计数 -1
+  - 请求到达时：优先检查该 API Key 的全局 in-flight 计数，若 < max_concurrent 则放行并计数 +1，否则拒绝
+  - 请求完成时（收到响应或连接断开）：全局计数 -1
+  - 当分布式计数存储不可用时，插件自动降级为单实例本地 in-flight 计数模式，保证服务可用性；同时记录降级状态与恢复状态，用于运维观测
 - 不同的 API Key 可配置不同的最大并发数
 - 实时跟踪每个 API Key 的当前 in-flight 请求数
+- 插件需避免因重试、超时、连接中断或重复回调导致计数泄漏或重复扣减
 
 #### 2.1.4 超限处理
 - 当某个 API Key 达到最大并发限制时，拒绝新请求
@@ -42,6 +48,8 @@
 #### 2.1.5 LLM Token 用量统计
 
 功能目标：精确统计每个 API Key 消耗的输入和输出 Token 数量，用于计费、配额管理及可观测性展示。
+
+适用范围：仅对命中 `domains` 配置的请求启用 Token 统计；未命中域名的请求完全 bypass，不参与任何 Token 统计逻辑。
 
 统计来源：优先从 LLM 服务提供商返回的响应数据中提取 usage 字段，确保数据与提供商计费账单一致，避免本地估算误差。
 
@@ -69,7 +77,7 @@ domains:
   - "api.example.com"
   - "*.service.example.com"
 
-api_key_header: "X-API-Key"  # 可选，默认为 X-API-Key
+# API Key 从 Authorization: Bearer <api_key> 中提取
 
 rate_limits:
   - api_key: "key_basic_001"
@@ -78,8 +86,21 @@ rate_limits:
   - api_key: "key_premium_001"
     max_concurrent: 50
 
-  - api_key: "default"       # 未匹配到的 API Key 使用此默认配置
+  - api_key: "default"       # 仅保留为兼容扩展位，首版不用于兜底放行未显式配置的 API Key
     max_concurrent: 5
+
+distributed_limit:
+  enabled: true
+  backend: "redis"            # 首版必须交付 redis 后端实现，作为默认分布式共享计数方案
+  fallback_to_local: true      # 分布式存储异常时降级为本地限流
+  key_prefix: "ratelimit:inflight"
+  redis:
+    address: "redis.default.svc.cluster.local:6379"
+    password: ""
+    db: 0
+    dial_timeout_ms: 100
+    read_timeout_ms: 100
+    write_timeout_ms: 100
 
 error_response:
   status_code: 429
@@ -94,6 +115,8 @@ token_statistics:
 #### 2.2.2 配置加载
 - 支持从 Envoy 配置文件加载
 - 支持通过 Istio EnvoyFilter 注入配置
+- 分布式限流配置需支持声明共享存储后端类型及其连接参数
+- 首版必须提供可运行的 Redis 后端配置与部署示例，后续其他后端应复用统一配置抽象
 
 ### 2.3 配置热更新
 
@@ -103,8 +126,9 @@ token_statistics:
 - 支持的热更新场景：
   - 新增 API Key 及其并发限制
   - 修改已有 API Key 的 max_concurrent 阈值
-  - 删除 API Key（移除后该 Key 回退到 default 配置）
+  - 删除 API Key（移除后该 Key 直接拒绝，不再由 `default` 配置兜底）
   - 新增或移除拦截域名
+  - 更新分布式限流后端配置（如 Redis 地址、超时、key 前缀、开关项）
 
 #### 2.3.2 实现机制
 - 利用 Istio EnvoyFilter 配置变更触发 Envoy 的 xDS 推送
@@ -144,7 +168,7 @@ token_statistics:
 ```json
 {
   "error": "invalid_api_key",
-  "message": "缺失或无效的 API Key"
+  "message": "Authorization 头缺失、格式非法，或其中的 API Key 未在限流配置中注册"
 }
 ```
 
@@ -159,6 +183,7 @@ token_statistics:
 - 插件崩溃不应影响 Envoy 主进程
 - 配置错误应有明确的错误提示
 - 限流状态应准确，避免误判
+- 分布式共享计数存储异常时，插件必须自动降级到单实例本地限流模式，并在共享存储恢复后可平滑恢复到分布式模式
 
 ### 3.3 可观测性
 - 记录关键操作日志
@@ -166,6 +191,9 @@ token_statistics:
   - 每个 API Key 的当前并发数
   - 限流拒绝次数
   - 请求处理延迟
+  - distributed_limit_degrade_total (Counter): 分布式限流降级次数
+  - distributed_limit_recover_total (Counter): 分布式限流恢复次数
+  - distributed_limit_backend_errors_total (Counter): 分布式后端访问失败次数
 - 暴露 LLM Token 指标 (新增)：
   - llm_prompt_tokens_total (Counter): 输入 Token 累计消耗。
     - 标签：api_key (脱敏), model, domain。
@@ -182,8 +210,11 @@ token_statistics:
 
 ### 4.1 并发计数器实现
 - 每个 API Key 维护一个 in-flight 计数器
-- 请求到达时：原子读取计数，若 < max_concurrent 则原子 +1 并放行，否则拒绝
-- 请求完成时：原子 -1（通过 OnHttpResponseHeaders 或 OnLog 回调）
+- 计数器实现需同时支持本地计数模式与分布式共享计数模式，并通过统一接口屏蔽底层存储差异
+- 请求到达时：优先读取全局共享计数，若 < max_concurrent 则执行原子 +1 并放行，否则拒绝
+- 请求完成时：执行原子 -1（通过 OnHttpResponseHeaders 或 OnLog 回调）
+- 分布式后端需提供原子自增、自减、过期保护或租约续期能力，避免请求异常退出后长期占用计数
+- 当分布式后端不可达或操作超时时，按配置自动切换为本地计数模式，并持续探测共享后端恢复状态
 - 需处理异常断开场景，确保计数器不会泄漏
 
 ### 4.2 配置热更新实现
@@ -192,18 +223,23 @@ token_statistics:
   1. 解析并校验新配置
   2. 对已有 API Key：保留当前 in-flight 计数，仅更新 max_concurrent
   3. 对新增 API Key：初始化计数器为 0
-  4. 对删除的 API Key：等待 in-flight 归零后清理，期间使用 default 配置
+  4. 对删除的 API Key：等待 in-flight 归零后清理；清理完成后该 Key 的新请求直接拒绝，不再使用 `default` 配置兜底
+  5. 对分布式存储配置：复用统一存储接口平滑切换连接与参数，避免影响已在处理中的请求
 - 配置解析失败时记录错误日志，继续使用旧配置
 
 ### 4.3 WebAssembly 集成
 - 使用 Proxy-Wasm Go SDK
 - 实现必要的生命周期回调：
   - OnPluginStart：加载/重新加载配置
-  - OnHttpRequestHeaders：检查并发数，决定放行或拒绝
+  - OnHttpRequestHeaders：对命中 `domains` 的请求解析 `Authorization: Bearer <api_key>`，完成 API Key 校验、并发检查，并决定放行或拒绝
   - OnHttpResponseHeaders / OnLog：释放并发计数
+- 未命中 `domains` 的请求在请求头阶段直接 bypass，不执行 Authorization 解析、并发限流或 Token 统计
+- 与外部分布式存储交互时需控制单次请求的超时与失败影响范围，避免阻塞 Envoy 主处理链路
 
 ### 4.4 状态管理
-- 使用共享内存存储限流状态
+- 本地 worker 内状态使用共享内存存储限流状态
+- 跨 Envoy 实例的全局并发状态通过可插拔外部存储维护，首版必须提供 Redis 后端实现
+- 需要区分本地视角计数与全局视角计数，避免监控与调试混淆
 - 考虑多 worker 场景的数据同步
 
 ### 4.5 Token 统计实现细节
@@ -250,24 +286,40 @@ token_statistics:
 
 ### 6.1 单元测试
 - 并发计数器逻辑测试
+- 分布式计数存储抽象测试（首版必须包含 Redis 后端契约测试）
 - 配置解析测试
 - 配置热更新逻辑测试
 
 ### 6.2 集成测试
 - 在真实 Envoy 环境中测试
 - 验证限流准确性
+- 验证多实例部署下的全局并发限制准确性
+- 首版必须包含基于 Redis 后端的端到端集成测试
+- 验证分布式后端异常时的本地降级行为与恢复行为
 - 压力测试验证性能
 
 ### 6.3 测试场景
-- 正常请求流量（并发数未达上限）
+- 正常请求流量（命中域名，且 `Authorization: Bearer <api_key>` 合法，并发数未达上限）
 - 超限场景（并发数达到上限，新请求被拒绝）
 - 并发释放（请求完成后计数器正确递减，新请求可放行）
-- 无效 API Key
+- 无效 API Key：
+  - 命中域名但缺失 `Authorization` 头
+  - 命中域名但 `Authorization` 头格式非法
+  - 命中域名且 Bearer token 为空
+  - 命中域名且 Bearer token 未在 `rate_limits` 中注册
+- 域名未命中场景：即使请求缺失 `Authorization`，也应完全 bypass，不执行限流与 Token 统计
 - 高并发场景
+- 多实例共享限流场景：
+  - 同一 API Key 的请求分别落到多个 Envoy 实例，验证使用全局并发计数后总并发不超过阈值
+  - 多个 API Key 并发访问，验证全局共享计数互不串扰
+- 分布式后端异常场景：
+  - Redis 不可用或超时，验证插件自动降级为本地限流模式
+  - Redis 恢复后，验证插件可平滑恢复为分布式限流模式
 - 配置热更新：
   - 运行中新增 API Key，验证新 Key 立即生效
   - 运行中修改 max_concurrent，验证新阈值生效
-  - 运行中删除 API Key，验证回退到 default 配置
+  - 运行中删除 API Key，验证该 Key 后续请求直接拒绝，不再回退到 `default` 配置
+  - 运行中修改分布式后端配置，验证新配置生效且不影响存量请求
   - 提交无效配置，验证旧配置不受影响
 - 异常断开场景（连接中断后计数器正确释放）
 - token 统计测试
@@ -286,12 +338,13 @@ token_statistics:
 1. Go 源代码
 2. 编译后的 .wasm 文件
 3. 部署配置示例（EnvoyFilter YAML）
-4. 使用文档
-5. 测试报告
+4. Redis 后端配置与部署示例
+5. 使用文档
+6. 测试报告
 
 ## 8. 后续优化方向
 
-- 支持分布式并发限制（跨多个 Envoy 实例共享计数，如通过 Redis）
 - 支持更多限流策略（QPS 速率限制、滑动窗口等）
 - 集成外部配置中心（如 etcd）实现更灵活的动态配置
 - 提供管理 API 查询实时并发状态
+- 扩展更多分布式共享计数后端（如 etcd、Consul 或专用限流服务）
