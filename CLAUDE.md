@@ -14,10 +14,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Custom output path:
   - `bash ./build.sh ./dist/custom-name.wasm`
 
-`build.sh` compiles the module root with:
-- `GOOS=wasip1`
-- `GOARCH=wasm`
-- `CGO_ENABLED=0`
+`build.sh` compiles the module root with TinyGo for Proxy-WASM compatibility:
+- `tinygo build`
+- `-target=wasi`
+- `-scheduler=none`
 
 Default artifact path:
 - `dist/rate-limiter.wasm`

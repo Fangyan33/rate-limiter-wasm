@@ -26,10 +26,6 @@ spec:
                         socket_address:
                           address: nginx-file-server-svc.default.svc.cluster.local
                           port_value: 80
-          transport_socket:
-            name: envoy.transport_sockets.tls
-            typed_config:
-              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
     - applyTo: HTTP_FILTER
       match:
         context: GATEWAY
@@ -54,14 +50,15 @@ spec:
                 code:
                   remote:
                     http_uri:
-                      uri: https://nginx-file-server-svc.default.svc.cluster.local/rate-limiter.wasm
+                      uri: http://nginx-file-server-svc.default.svc.cluster.local/rate-limiter.wasm
                       cluster: rate-limiter-wasm-artifact
                       timeout: 10s
+                    sha256: 3f97811c04d629d82a20ffdff59d96960433cc4389384de603ebdb4118990701
               configuration:
                 "@type": type.googleapis.com/google.protobuf.StringValue
                 value: |
                   domains:
-                    - api.example.com
+                    - llm-demo.local
                   rate_limits:
                     - api_key: key_basic_001
                       max_concurrent: 2
