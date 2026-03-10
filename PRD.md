@@ -277,7 +277,7 @@ token_statistics:
 
 ### 5.2 Istio 集成
 - 通过 EnvoyFilter 资源部署
-- 支持 Istio 1.14+ 版本
+- 支持 Istio 1.13+ 版本
 
 ### 5.3 配置示例
 提供完整的 Kubernetes/Istio 部署 YAML 示例
