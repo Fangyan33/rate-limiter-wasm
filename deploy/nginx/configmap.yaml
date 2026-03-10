@@ -26,8 +26,17 @@ data:
             index  index.html index.htm;
         }
 
+        location /api/v1/chat/completions {
+            default_type application/json;
+            return 200 '{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"我是GLM大语言模型，由Z.ai训练开发。我基于海量文本数据学习，能够理解和生成人类语言，回答问题、提供信息和进行对话交流。\n\n我的设计目标是成为一个有用、无害的AI助手，帮助用户解决各种问题。我不断学习和改进，但仍有局限性，有时可能无法完全满足用户需求。\n\n有什么我能帮助你的问题或任务吗？","reasoning_content":"让我仔细思考如何回答这个用户的问题。首先需要明确，用户在询问我的身份，这是一个基础但重要的问题。我应该简洁地介绍自己的核心信息，包括作为GLM大语言模型的基本定位。\n\n接着，要考虑如何让回答更加友好和亲切。用户可能希望了解我能提供什么样的帮助，所以应该强调我的多功能性和服务范围。这包括语言理解、知识问答、创意写作等能力。\n\n同时，要注意表达方式的自然流畅。避免过于技术性的术语，让用户能够轻松理解。可以适当使用一些积极正面的词汇，如\"智能助手\"、\"知识储备\"等，来展现我的专业性和亲和力。\n\n考虑到用户可能对AI技术感兴趣，可以简要提及我的训练基础，但不需要过于详细。重点是让用户知道我是一个能够提供实际帮助的AI助手。\n\n最后，要以开放式的结尾来促进进一步的互动，比如询问用户有什么具体需要帮助的。这样既能保持对话的连续性，又能让用户感受到我的服务态度。","role":"assistant"}}],"created":1773131558,"id":"202603101632338c4a00d1078a4021","model":"glm-4.7-flash","object":"chat.completion","request_id":"202603101632338c4a00d1078a4021","usage":{"completion_tokens":282,"completion_tokens_details":{"reasoning_tokens":202},"prompt_tokens":7,"prompt_tokens_details":{"cached_tokens":3},"total_tokens":289}}';
+        }
+
         error_page   500 502 503 504  /50x.html;
         location = /50x.html {
             root   /usr/share/nginx/html;
         }
     }
+
+
+
+    
