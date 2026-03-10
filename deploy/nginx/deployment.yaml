@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-file-server
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-file-server
+  template:
+    metadata:
+      labels:
+        app: nginx-file-server
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:stable-perl
+        ports:
+        - containerPort: 80
+        
+        volumeMounts:
+        # 1. 挂载 Nginx 配置
+        - name: nginx-config-volume
+          mountPath: /etc/nginx/conf.d/default.conf
+          subPath: default.conf # 使用 subPath 确保只覆盖该文件，不覆盖整个 conf.d 目录
+        
+        # 2. 挂载主机文件目录
+        - name: file-data-volume
+          mountPath: /usr/share/nginx/html/files # 容器内路径，需与 ConfigMap 中的 root 路径一致
+          readOnly: false # 如果需要 Nginx 写入文件（如上传），设为 false；只读服务可设为 true
+
+      volumes:
+      # 定义配置卷
+      - name: nginx-config-volume
+        configMap:
+          name: nginx-file-server-config # 引用上面创建的 ConfigMap
+      
+      # 定义主机数据卷
+      - name: file-data-volume
+        hostPath:
+          path: /root/data # 节点主机上的真实路径
+          type: DirectoryOrCreate # 如果目录不存在，K8s 会自动创建

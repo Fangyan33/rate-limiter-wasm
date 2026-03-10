@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-file-server-svc
+  namespace: default
+spec:
+  type: ClusterIP
+  selector:
+    app: nginx-file-server
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 80
+    #nodePort: 30080 # 指定端口，范围 30000-32767；如果不指定会随机分配

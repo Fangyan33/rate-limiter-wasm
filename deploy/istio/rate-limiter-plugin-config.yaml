@@ -1,0 +1,16 @@
+domains:
+  - api.example.com
+rate_limits:
+  - api_key: key_basic_001
+    max_concurrent: 2
+  - api_key: key_premium_001
+    max_concurrent: 5
+distributed_limit:
+  enabled: true
+  backend: counter_service
+  counter_service:
+    cluster: ratelimit-service
+    timeout_ms: 200
+error_response:
+  status_code: 429
+  message: Rate limit exceeded
