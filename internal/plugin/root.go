@@ -24,15 +24,17 @@ type vmContext struct {
 
 type rootContext struct {
 	types.DefaultPluginContext
-	cfg     config.Config
-	matcher *matcher.DomainMatcher
-	limiter requestLimiter
+	cfg              config.Config
+	matcher          *matcher.DomainMatcher
+	limiter          requestLimiter
+	asyncDistributed bool
 }
 
 type httpContext struct {
 	types.DefaultHttpContext
-	root    *rootContext
-	release func()
+	root           *rootContext
+	release        func()
+	pendingAcquire bool
 }
 
 func NewVMContext() types.VMContext {
@@ -80,6 +82,8 @@ func (r *rootContext) LoadConfiguration(data []byte) error {
 
 	r.cfg = cfg
 	r.matcher = domainMatcher
+	r.asyncDistributed = cfg.DistributedLimit.Enabled &&
+		cfg.DistributedLimit.Backend == "counter_service"
 
 	requestLimiter, err := newRequestLimiter(cfg, limits)
 	if err != nil {
@@ -116,6 +120,13 @@ func (h *httpContext) OnHttpRequestHeaders(numHeaders int, endOfStream bool) typ
 	apiKey, err := auth.ParseBearerToken(authorization)
 	if err != nil {
 		return h.reject()
+	}
+
+	// When counter_service async mode is enabled, pause the request
+	// while the distributed acquire decision is pending.
+	if h.root.asyncDistributed {
+		h.pendingAcquire = true
+		return types.ActionPause
 	}
 
 	release, ok := h.root.limiter.Acquire(apiKey)
