@@ -37,8 +37,11 @@ type DistributedLimitConfig struct {
 }
 
 type CounterServiceConfig struct {
-	Cluster   string `yaml:"cluster"`
-	TimeoutMS int    `yaml:"timeout_ms"`
+	Cluster     string `yaml:"cluster"`
+	TimeoutMS   int    `yaml:"timeout_ms"`
+	AcquirePath string `yaml:"acquire_path"`
+	ReleasePath string `yaml:"release_path"`
+	LeaseTTLMS  int    `yaml:"lease_ttl_ms"`
 }
 
 type RedisStoreConfig struct {

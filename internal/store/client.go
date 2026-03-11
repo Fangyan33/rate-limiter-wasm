@@ -8,13 +8,8 @@ import (
 	"rate-limiter-wasm/internal/limiter"
 )
 
-type counterService interface {
-	Acquire(apiKey string, limit int) (func(), bool, error)
-	Name() string
-}
-
 type client struct {
-	service counterService
+	http *httpCounterServiceClient
 }
 
 func NewClient(cfg config.CounterServiceConfig) (limiter.DistributedStore, error) {
@@ -25,28 +20,37 @@ func NewClient(cfg config.CounterServiceConfig) (limiter.DistributedStore, error
 	if cfg.TimeoutMS < 0 {
 		return nil, fmt.Errorf("counter_service.timeout_ms must be >= 0")
 	}
+	if strings.TrimSpace(cfg.AcquirePath) == "" {
+		return nil, fmt.Errorf("counter_service.acquire_path must not be empty")
+	}
+	if !strings.HasPrefix(cfg.AcquirePath, "/") {
+		return nil, fmt.Errorf("counter_service.acquire_path must start with /")
+	}
+	if strings.TrimSpace(cfg.ReleasePath) == "" {
+		return nil, fmt.Errorf("counter_service.release_path must not be empty")
+	}
+	if !strings.HasPrefix(cfg.ReleasePath, "/") {
+		return nil, fmt.Errorf("counter_service.release_path must start with /")
+	}
+	if cfg.LeaseTTLMS <= 0 {
+		return nil, fmt.Errorf("counter_service.lease_ttl_ms must be > 0")
+	}
 
-	return &client{service: newNoopCounterService()}, nil
+	return &client{
+		http: &httpCounterServiceClient{
+			cluster:     cluster,
+			timeoutMS:   cfg.TimeoutMS,
+			acquirePath: cfg.AcquirePath,
+			releasePath: cfg.ReleasePath,
+			leaseTTLMS:  cfg.LeaseTTLMS,
+		},
+	}, nil
 }
 
 func (c *client) Acquire(apiKey string, limit int) (func(), bool, error) {
-	return c.service.Acquire(apiKey, limit)
-}
-
-func (c *client) Name() string {
-	return "counter_service"
-}
-
-type noopCounterService struct{}
-
-func newNoopCounterService() counterService {
-	return &noopCounterService{}
-}
-
-func (s *noopCounterService) Acquire(apiKey string, limit int) (func(), bool, error) {
 	return nil, false, limiter.ErrStoreUnavailable
 }
 
-func (s *noopCounterService) Name() string {
+func (c *client) Name() string {
 	return "counter_service"
 }
