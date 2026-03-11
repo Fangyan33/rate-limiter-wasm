@@ -208,31 +208,20 @@ error_response:
 `))
 	defer reset()
 
+	// With the async distributed path enabled, requests pause while
+	// the counter-service acquire decision is pending. The synchronous
+	// fallback to local limiting will be exercised by the callback
+	// handler in a later task; for now, verify the pause behavior.
 	firstID := host.InitializeHttpContext()
 	firstAction := host.CallOnRequestHeaders(firstID, [][2]string{
 		{":authority", "api.example.com"},
 		{"authorization", "Bearer key_basic_001"},
 	}, false)
-	if firstAction != types.ActionContinue {
-		t.Fatalf("expected first request to continue with counter_service fallback, got %v", firstAction)
+	if firstAction != types.ActionPause {
+		t.Fatalf("expected first request to pause for async distributed acquire, got %v", firstAction)
 	}
-
-	secondID := host.InitializeHttpContext()
-	secondAction := host.CallOnRequestHeaders(secondID, [][2]string{
-		{":authority", "api.example.com"},
-		{"authorization", "Bearer key_basic_001"},
-	}, false)
-	assertRejected(t, host, secondID, secondAction, 429, "Rate limit exceeded")
-
-	host.CompleteHttpContext(firstID)
-
-	thirdID := host.InitializeHttpContext()
-	thirdAction := host.CallOnRequestHeaders(thirdID, [][2]string{
-		{":authority", "api.example.com"},
-		{"authorization", "Bearer key_basic_001"},
-	}, false)
-	if thirdAction != types.ActionContinue {
-		t.Fatalf("expected request after release to continue with counter_service fallback, got %v", thirdAction)
+	if resp := host.GetSentLocalResponse(firstID); resp != nil {
+		t.Fatalf("expected no local response while acquire decision is pending, got %#v", resp)
 	}
 }
 
@@ -252,6 +241,40 @@ distributed_limit:
 `))
 	if err == nil {
 		t.Fatal("expected invalid counter_service config to be rejected")
+	}
+}
+
+func TestPluginPausesRequestWhileCounterServiceAcquireIsPending(t *testing.T) {
+	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
+  - api.example.com
+rate_limits:
+  - api_key: key_basic_001
+    max_concurrent: 1
+distributed_limit:
+  enabled: true
+  backend: counter_service
+  counter_service:
+    cluster: ratelimit-service
+    acquire_path: /acquire
+    release_path: /release
+    lease_ttl_ms: 30000
+error_response:
+  status_code: 429
+  message: Rate limit exceeded
+`))
+	defer reset()
+
+	contextID := host.InitializeHttpContext()
+	action := host.CallOnRequestHeaders(contextID, [][2]string{
+		{":authority", "api.example.com"},
+		{"authorization", "Bearer key_basic_001"},
+	}, false)
+
+	if action != types.ActionPause {
+		t.Fatalf("expected distributed acquire to pause request, got %v", action)
+	}
+	if resp := host.GetSentLocalResponse(contextID); resp != nil {
+		t.Fatalf("expected no local response while acquire decision is pending, got %#v", resp)
 	}
 }
 
