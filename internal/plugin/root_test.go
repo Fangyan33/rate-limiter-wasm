@@ -202,6 +202,9 @@ distributed_limit:
   backend: counter_service
   counter_service:
     cluster: ratelimit-service
+    acquire_path: /acquire
+    release_path: /release
+    lease_ttl_ms: 30000
 error_response:
   status_code: 429
   message: Rate limit exceeded

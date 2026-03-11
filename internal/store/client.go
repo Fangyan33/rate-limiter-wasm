@@ -8,13 +8,8 @@ import (
 	"rate-limiter-wasm/internal/limiter"
 )
 
-type counterService interface {
-	Acquire(apiKey string, limit int) (func(), bool, error)
-	Name() string
-}
-
 type client struct {
-	service counterService
+	http *httpCounterServiceClient
 }
 
 func NewClient(cfg config.CounterServiceConfig) (limiter.DistributedStore, error) {
@@ -41,43 +36,21 @@ func NewClient(cfg config.CounterServiceConfig) (limiter.DistributedStore, error
 		return nil, fmt.Errorf("counter_service.lease_ttl_ms must be > 0")
 	}
 
-	return &client{service: newNoopCounterService(counterServiceOptions{
-		cluster:     cluster,
-		timeoutMS:   cfg.TimeoutMS,
-		acquirePath: cfg.AcquirePath,
-		releasePath: cfg.ReleasePath,
-		leaseTTLMS:  cfg.LeaseTTLMS,
-	})}, nil
+	return &client{
+		http: &httpCounterServiceClient{
+			cluster:     cluster,
+			timeoutMS:   cfg.TimeoutMS,
+			acquirePath: cfg.AcquirePath,
+			releasePath: cfg.ReleasePath,
+			leaseTTLMS:  cfg.LeaseTTLMS,
+		},
+	}, nil
 }
 
 func (c *client) Acquire(apiKey string, limit int) (func(), bool, error) {
-	return c.service.Acquire(apiKey, limit)
-}
-
-func (c *client) Name() string {
-	return "counter_service"
-}
-
-type counterServiceOptions struct {
-	cluster     string
-	timeoutMS   int
-	acquirePath string
-	releasePath string
-	leaseTTLMS  int
-}
-
-type noopCounterService struct {
-	options counterServiceOptions
-}
-
-func newNoopCounterService(options counterServiceOptions) counterService {
-	return &noopCounterService{options: options}
-}
-
-func (s *noopCounterService) Acquire(apiKey string, limit int) (func(), bool, error) {
 	return nil, false, limiter.ErrStoreUnavailable
 }
 
-func (s *noopCounterService) Name() string {
+func (c *client) Name() string {
 	return "counter_service"
 }
