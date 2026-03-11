@@ -154,7 +154,70 @@ distributed_limit:
 	}
 }
 
-func TestParseDistributedStoreCounterServiceConfigLeavesTimeoutUnsetWhenOmitted(t *testing.T) {
+func TestParseDistributedStoreCounterServiceDefaultsPathsAndLeaseTTL(t *testing.T) {
+	cfg, err := config.Parse([]byte(`domains:
+  - api.example.com
+rate_limits:
+  - api_key: key_basic_001
+    max_concurrent: 10
+distributed_limit:
+  enabled: true
+  backend: "counter_service"
+  counter_service:
+    cluster: "ratelimit-service"
+`))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if cfg.DistributedLimit.CounterService.AcquirePath != "/acquire" {
+		t.Fatalf("expected default acquire_path=/acquire, got %q", cfg.DistributedLimit.CounterService.AcquirePath)
+	}
+	if cfg.DistributedLimit.CounterService.ReleasePath != "/release" {
+		t.Fatalf("expected default release_path=/release, got %q", cfg.DistributedLimit.CounterService.ReleasePath)
+	}
+	if cfg.DistributedLimit.CounterService.LeaseTTLMS != 30000 {
+		t.Fatalf("expected default lease_ttl_ms=30000, got %d", cfg.DistributedLimit.CounterService.LeaseTTLMS)
+	}
+}
+
+func TestParseDistributedStoreCounterServiceRejectsInvalidLeaseTTL(t *testing.T) {
+	_, err := config.Parse([]byte(`domains:
+  - api.example.com
+rate_limits:
+  - api_key: key_basic_001
+    max_concurrent: 10
+distributed_limit:
+  enabled: true
+  backend: "counter_service"
+  counter_service:
+    cluster: "ratelimit-service"
+    lease_ttl_ms: 0
+`))
+	if err == nil {
+		t.Fatal("expected Parse() to reject non-positive lease_ttl_ms")
+	}
+}
+
+func TestParseDistributedStoreCounterServiceRejectsPathWithoutLeadingSlash(t *testing.T) {
+	_, err := config.Parse([]byte(`domains:
+  - api.example.com
+rate_limits:
+  - api_key: key_basic_001
+    max_concurrent: 10
+distributed_limit:
+  enabled: true
+  backend: "counter_service"
+  counter_service:
+    cluster: "ratelimit-service"
+    acquire_path: acquire
+`))
+	if err == nil {
+		t.Fatal("expected Parse() to reject acquire_path without leading slash")
+	}
+}
+
+func TestParseDistributedStoreCounterServiceLeavesTimeoutUnsetWhenOmitted(t *testing.T) {
 	cfg, err := config.Parse([]byte(`domains:
   - api.example.com
 rate_limits:

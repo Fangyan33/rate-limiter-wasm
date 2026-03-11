@@ -25,8 +25,29 @@ func NewClient(cfg config.CounterServiceConfig) (limiter.DistributedStore, error
 	if cfg.TimeoutMS < 0 {
 		return nil, fmt.Errorf("counter_service.timeout_ms must be >= 0")
 	}
+	if strings.TrimSpace(cfg.AcquirePath) == "" {
+		return nil, fmt.Errorf("counter_service.acquire_path must not be empty")
+	}
+	if !strings.HasPrefix(cfg.AcquirePath, "/") {
+		return nil, fmt.Errorf("counter_service.acquire_path must start with /")
+	}
+	if strings.TrimSpace(cfg.ReleasePath) == "" {
+		return nil, fmt.Errorf("counter_service.release_path must not be empty")
+	}
+	if !strings.HasPrefix(cfg.ReleasePath, "/") {
+		return nil, fmt.Errorf("counter_service.release_path must start with /")
+	}
+	if cfg.LeaseTTLMS <= 0 {
+		return nil, fmt.Errorf("counter_service.lease_ttl_ms must be > 0")
+	}
 
-	return &client{service: newNoopCounterService()}, nil
+	return &client{service: newNoopCounterService(counterServiceOptions{
+		cluster:     cluster,
+		timeoutMS:   cfg.TimeoutMS,
+		acquirePath: cfg.AcquirePath,
+		releasePath: cfg.ReleasePath,
+		leaseTTLMS:  cfg.LeaseTTLMS,
+	})}, nil
 }
 
 func (c *client) Acquire(apiKey string, limit int) (func(), bool, error) {
@@ -37,10 +58,20 @@ func (c *client) Name() string {
 	return "counter_service"
 }
 
-type noopCounterService struct{}
+type counterServiceOptions struct {
+	cluster     string
+	timeoutMS   int
+	acquirePath string
+	releasePath string
+	leaseTTLMS  int
+}
 
-func newNoopCounterService() counterService {
-	return &noopCounterService{}
+type noopCounterService struct {
+	options counterServiceOptions
+}
+
+func newNoopCounterService(options counterServiceOptions) counterService {
+	return &noopCounterService{options: options}
 }
 
 func (s *noopCounterService) Acquire(apiKey string, limit int) (func(), bool, error) {
