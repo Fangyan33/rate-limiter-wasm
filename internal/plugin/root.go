@@ -185,9 +185,48 @@ func (h *httpContext) OnHttpRequestHeaders(numHeaders int, endOfStream bool) typ
 }
 
 func (h *httpContext) OnHttpStreamDone() {
+	// Release local limiter slot if acquired
 	if h.release != nil {
 		h.release()
 		h.release = nil
+	}
+
+	// Dispatch best-effort distributed release if we have a lease
+	if h.distributedLeaseID != "" && h.root != nil && h.root.asyncDistributed {
+		cs := h.root.counterService
+		body, _ := json.Marshal(struct {
+			APIKey  string `json:"api_key"`
+			LeaseID string `json:"lease_id"`
+		}{
+			APIKey:  h.distributedAPIKey,
+			LeaseID: h.distributedLeaseID,
+		})
+
+		timeout := uint32(cs.TimeoutMS)
+		if timeout == 0 {
+			timeout = 5000
+		}
+
+		_, err := proxywasm.DispatchHttpCall(
+			cs.Cluster,
+			[][2]string{
+				{":method", "POST"},
+				{":path", cs.ReleasePath},
+				{":authority", cs.Cluster},
+				{"content-type", "application/json"},
+			},
+			body,
+			nil,
+			timeout,
+			func(numHeaders, bodySize, numTrailers int) {
+				// Best-effort release, ignore response
+			},
+		)
+		if err != nil {
+			proxywasm.LogWarnf("dispatch release callout: %v", err)
+		}
+
+		h.distributedLeaseID = ""
 	}
 }
 

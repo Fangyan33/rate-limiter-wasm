@@ -1,6 +1,7 @@
 package plugin_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"rate-limiter-wasm/internal/plugin"
@@ -325,6 +326,77 @@ error_response:
 	}
 	if resp := host.GetSentLocalResponse(contextID); resp != nil {
 		t.Fatalf("expected no local response after successful acquire, got %#v", resp)
+	}
+}
+
+func TestPluginDispatchesCounterServiceReleaseOnStreamDone(t *testing.T) {
+	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
+  - api.example.com
+rate_limits:
+  - api_key: key_basic_001
+    max_concurrent: 1
+distributed_limit:
+  enabled: true
+  backend: counter_service
+  counter_service:
+    cluster: ratelimit-service
+    acquire_path: /acquire
+    release_path: /release
+    lease_ttl_ms: 30000
+error_response:
+  status_code: 429
+  message: Rate limit exceeded
+`))
+	defer reset()
+
+	contextID := host.InitializeHttpContext()
+	action := host.CallOnRequestHeaders(contextID, [][2]string{
+		{":authority", "api.example.com"},
+		{"authorization", "Bearer key_basic_001"},
+	}, false)
+	if action != types.ActionPause {
+		t.Fatalf("expected request to pause, got %v", action)
+	}
+
+	callouts := host.GetCalloutAttributesFromContext(contextID)
+	if len(callouts) != 1 {
+		t.Fatalf("expected one acquire callout, got %d", len(callouts))
+	}
+
+	// Simulate successful acquire with lease_id
+	host.CallOnHttpCallResponse(callouts[0].CalloutID, [][2]string{{":status", "200"}}, nil, []byte(`{"allowed":true,"lease_id":"lease-abc-123"}`))
+
+	if got := host.GetCurrentHttpStreamAction(contextID); got != types.ActionContinue {
+		t.Fatalf("expected request to resume, got %v", got)
+	}
+
+	// Complete the stream
+	host.CompleteHttpContext(contextID)
+
+	// Check that a release callout was dispatched
+	releaseCallouts := host.GetCalloutAttributesFromContext(contextID)
+	if len(releaseCallouts) != 2 {
+		t.Fatalf("expected acquire + release callouts, got %d", len(releaseCallouts))
+	}
+
+	releaseCallout := releaseCallouts[1]
+	if releaseCallout.Upstream != "ratelimit-service" {
+		t.Fatalf("unexpected release upstream: %q", releaseCallout.Upstream)
+	}
+
+	// Verify release request body contains api_key and lease_id
+	var releaseReq struct {
+		APIKey  string `json:"api_key"`
+		LeaseID string `json:"lease_id"`
+	}
+	if err := json.Unmarshal(releaseCallout.Body, &releaseReq); err != nil {
+		t.Fatalf("parse release request body: %v", err)
+	}
+	if releaseReq.APIKey != "key_basic_001" {
+		t.Fatalf("unexpected api_key in release: %q", releaseReq.APIKey)
+	}
+	if releaseReq.LeaseID != "lease-abc-123" {
+		t.Fatalf("unexpected lease_id in release: %q", releaseReq.LeaseID)
 	}
 }
 
