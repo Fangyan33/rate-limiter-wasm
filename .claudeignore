@@ -1,0 +1,122 @@
+# ===============================
+# 核心编译输出
+# ===============================
+dist/
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# ===============================
+# 锁文件 (通常不需要 AI 读取)
+# ===============================
+# Go
+go.sum
+
+# Node.js
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Python
+Pipfile.lock
+poetry.lock
+
+# Rust
+Cargo.lock
+
+# Ruby
+Gemfile.lock
+
+# ===============================
+# 测试与覆盖率报告
+# ===============================
+coverage.out
+coverage.html
+coverage.xml
+*.lcov
+.nyc_output/
+test-results/
+*.testlog
+
+# ===============================
+# 依赖库目录 (多语言通用)
+# ===============================
+# Go
+vendor/
+
+# Node.js
+node_modules/
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Java/JVM
+target/
+build/
+.gradle/
+
+# Rust
+target/
+
+# PHP
+vendor/
+
+# ===============================
+# 大型数据与媒体文件
+# ===============================
+# 数据库与备份
+*.sql
+*.dump
+*.bak
+
+# 大数据格式
+*.csv
+*.parquet
+*.avro
+
+# 压缩包
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# 媒体文件 (通常不需要代码分析)
+*.mp3
+*.mp4
+*.wav
+*.avi
+*.mov
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.ico
+
+# ===============================
+# 日志与临时文件
+# ===============================
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.temp
+*.swp
+*.swo
+
+# ===============================
+# IDE 与系统文件
+# ===============================
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
