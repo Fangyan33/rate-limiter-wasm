@@ -194,10 +194,32 @@ func (h *httpContext) OnHttpStreamDone() {
 func (h *httpContext) onAcquireResponse(numHeaders, bodySize, numTrailers int) {
 	h.pendingAcquire = false
 
+	// Check HTTP status first
+	headers, err := proxywasm.GetHttpCallResponseHeaders()
+	if err != nil {
+		proxywasm.LogErrorf("read acquire response headers: %v", err)
+		h.fallbackToLocalLimiter()
+		return
+	}
+
+	status := ""
+	for _, header := range headers {
+		if header[0] == ":status" {
+			status = header[1]
+			break
+		}
+	}
+
+	if status != "200" {
+		proxywasm.LogWarnf("counter service returned status %s, falling back to local limiter", status)
+		h.fallbackToLocalLimiter()
+		return
+	}
+
 	body, err := proxywasm.GetHttpCallResponseBody(0, math.MaxInt32)
 	if err != nil {
 		proxywasm.LogErrorf("read acquire response body: %v", err)
-		h.reject()
+		h.fallbackToLocalLimiter()
 		return
 	}
 
@@ -207,7 +229,7 @@ func (h *httpContext) onAcquireResponse(numHeaders, bodySize, numTrailers int) {
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
 		proxywasm.LogErrorf("parse acquire response: %v", err)
-		h.reject()
+		h.fallbackToLocalLimiter()
 		return
 	}
 
@@ -219,6 +241,24 @@ func (h *httpContext) onAcquireResponse(numHeaders, bodySize, numTrailers int) {
 	h.distributedLeaseID = resp.LeaseID
 	if err := proxywasm.ResumeHttpRequest(); err != nil {
 		proxywasm.LogErrorf("resume http request: %v", err)
+	}
+}
+
+func (h *httpContext) fallbackToLocalLimiter() {
+	if h.root == nil || h.root.limiter == nil {
+		h.reject()
+		return
+	}
+
+	release, ok := h.root.limiter.Acquire(h.distributedAPIKey)
+	if !ok {
+		h.reject()
+		return
+	}
+
+	h.release = release
+	if err := proxywasm.ResumeHttpRequest(); err != nil {
+		proxywasm.LogErrorf("resume http request after fallback: %v", err)
 	}
 }
 

@@ -328,6 +328,80 @@ error_response:
 	}
 }
 
+func TestPluginFallsBackToLocalLimitWhenAsyncAcquireFails(t *testing.T) {
+	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
+  - api.example.com
+rate_limits:
+  - api_key: key_basic_001
+    max_concurrent: 1
+distributed_limit:
+  enabled: true
+  backend: counter_service
+  counter_service:
+    cluster: ratelimit-service
+    acquire_path: /acquire
+    release_path: /release
+    lease_ttl_ms: 30000
+error_response:
+  status_code: 429
+  message: Rate limit exceeded
+`))
+	defer reset()
+
+	// First request: async acquire fails, falls back to local limiter
+	ctx1 := host.InitializeHttpContext()
+	action := host.CallOnRequestHeaders(ctx1, [][2]string{
+		{":authority", "api.example.com"},
+		{"authorization", "Bearer key_basic_001"},
+	}, false)
+	if action != types.ActionPause {
+		t.Fatalf("expected first request to pause, got %v", action)
+	}
+
+	callouts := host.GetCalloutAttributesFromContext(ctx1)
+	if len(callouts) != 1 {
+		t.Fatalf("expected one callout, got %d", len(callouts))
+	}
+
+	// Simulate acquire failure with non-200 status
+	host.CallOnHttpCallResponse(callouts[0].CalloutID, [][2]string{{":status", "500"}}, nil, []byte(`{"error":"service unavailable"}`))
+
+	// First request should resume after fallback acquire
+	if got := host.GetCurrentHttpStreamAction(ctx1); got != types.ActionContinue {
+		t.Fatalf("expected first request to resume after fallback, got %v", got)
+	}
+	if resp := host.GetSentLocalResponse(ctx1); resp != nil {
+		t.Fatalf("expected no rejection for first request, got %#v", resp)
+	}
+
+	// Second request: should be rejected by local fallback limit
+	ctx2 := host.InitializeHttpContext()
+	action2 := host.CallOnRequestHeaders(ctx2, [][2]string{
+		{":authority", "api.example.com"},
+		{"authorization", "Bearer key_basic_001"},
+	}, false)
+	if action2 != types.ActionPause {
+		t.Fatalf("expected second request to pause, got %v", action2)
+	}
+
+	callouts2 := host.GetCalloutAttributesFromContext(ctx2)
+	if len(callouts2) != 1 {
+		t.Fatalf("expected one callout for second request, got %d", len(callouts2))
+	}
+
+	// Simulate second acquire failure
+	host.CallOnHttpCallResponse(callouts2[0].CalloutID, [][2]string{{":status", "500"}}, nil, nil)
+
+	// Second request should be rejected by local fallback
+	resp2 := host.GetSentLocalResponse(ctx2)
+	if resp2 == nil {
+		t.Fatal("expected second request to be rejected by local fallback")
+	}
+	if resp2.StatusCode != 429 {
+		t.Fatalf("unexpected status: got %d want 429", resp2.StatusCode)
+	}
+}
+
 func TestPluginRejectsRequestWhenCounterServiceAcquireDenies(t *testing.T) {
 	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
   - api.example.com
