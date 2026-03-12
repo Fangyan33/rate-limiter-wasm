@@ -333,16 +333,23 @@ func safeLogCriticalf(format string, args ...any) {
 }
 
 func newRequestLimiter(cfg config.Config, limits map[string]int) (requestLimiter, error) {
-	if !cfg.DistributedLimit.Enabled {
+	// Counter service mode uses async HTTP callouts in the plugin layer,
+	// so we only need a local limiter for fallback.
+	if cfg.DistributedLimit.Enabled && cfg.DistributedLimit.Backend == "counter_service" {
 		return limiter.NewLocalLimiter(limits), nil
 	}
 
-	distributedStore, err := store.NewClient(cfg.DistributedLimit.CounterService)
-	if err != nil {
-		return nil, err
+	// Non-counter-service distributed modes (if any) would use the
+	// synchronous distributed limiter path.
+	if cfg.DistributedLimit.Enabled {
+		distributedStore, err := store.NewClient(cfg.DistributedLimit.CounterService)
+		if err != nil {
+			return nil, err
+		}
+		return limiter.NewDistributedLimiter(limits, distributedStore), nil
 	}
 
-	return limiter.NewDistributedLimiter(limits, distributedStore), nil
+	return limiter.NewLocalLimiter(limits), nil
 }
 
 func normalizeHost(host string) string {
