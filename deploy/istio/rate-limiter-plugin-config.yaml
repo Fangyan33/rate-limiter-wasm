@@ -9,7 +9,7 @@ distributed_limit:
   enabled: true
   backend: counter_service
   counter_service:
-    cluster: ratelimit-service
+    cluster: counter-service
     acquire_path: /acquire
     release_path: /release
     timeout_ms: 5000
