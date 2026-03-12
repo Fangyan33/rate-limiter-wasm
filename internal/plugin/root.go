@@ -335,12 +335,23 @@ func safeLogCriticalf(format string, args ...any) {
 func newRequestLimiter(cfg config.Config, limits map[string]int) (requestLimiter, error) {
 	// Counter service mode uses async HTTP callouts in the plugin layer,
 	// so we only need a local limiter for fallback.
+	//
+	// The async HTTP flow is implemented in OnHttpRequestHeaders (acquire)
+	// and OnHttpStreamDone (release) using proxywasm.DispatchHttpCall().
+	// This is required because Proxy-WASM SDK only supports async HTTP calls.
+	//
+	// See internal/store/client.go for details on why the DistributedStore
+	// interface is not used for counter_service mode.
 	if cfg.DistributedLimit.Enabled && cfg.DistributedLimit.Backend == "counter_service" {
 		return limiter.NewLocalLimiter(limits), nil
 	}
 
 	// Non-counter-service distributed modes (if any) would use the
 	// synchronous distributed limiter path.
+	//
+	// NOTE: Currently no other distributed backends are implemented.
+	// This path exists for potential future synchronous backends
+	// (e.g., direct Redis protocol, gRPC services).
 	if cfg.DistributedLimit.Enabled {
 		distributedStore, err := store.NewClient(cfg.DistributedLimit.CounterService)
 		if err != nil {
