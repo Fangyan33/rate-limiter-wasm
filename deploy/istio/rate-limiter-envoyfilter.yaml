@@ -71,14 +71,14 @@ spec:
                       uri: http://nginx-file-server-svc.default.svc.cluster.local/rate-limiter.wasm
                       cluster: rate-limiter-wasm-artifact
                       timeout: 10s
-                    sha256: 3f97811c04d629d82a20ffdff59d96960433cc4389384de603ebdb4118990701
+                    sha256: a734d48344aae1a4f0656b33260dcd73b4ea905815f84cd7d329d24330d01a43
               configuration:
                 "@type": type.googleapis.com/google.protobuf.StringValue
                 value: |
                   domains:
                     - llm-demo.local
                   rate_limits:
-                    - api_key: key_basic_001
+                    - api_key: 9353c0ddee1b
                       max_concurrent: 2
                     - api_key: key_premium_001
                       max_concurrent: 5
