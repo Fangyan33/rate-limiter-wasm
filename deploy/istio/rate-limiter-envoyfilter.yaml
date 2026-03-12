@@ -14,24 +14,6 @@ spec:
       patch:
         operation: ADD
         value:
-          name: rate-limiter-wasm-artifact
-          type: STRICT_DNS
-          connect_timeout: 5s
-          load_assignment:
-            cluster_name: rate-limiter-wasm-artifact
-            endpoints:
-              - lb_endpoints:
-                  - endpoint:
-                      address:
-                        socket_address:
-                          address: nginx-file-server-svc.default.svc.cluster.local
-                          port_value: 80
-    - applyTo: CLUSTER
-      match:
-        context: GATEWAY
-      patch:
-        operation: ADD
-        value:
           name: counter-service
           type: STRICT_DNS
           connect_timeout: 1s
@@ -69,7 +51,7 @@ spec:
                   remote:
                     http_uri:
                       uri: http://nginx-file-server-svc.default.svc.cluster.local/rate-limiter.wasm
-                      cluster: rate-limiter-wasm-artifact
+                      cluster: outbound|80||nginx-file-server-svc.default.svc.cluster.local
                       timeout: 10s
                     sha256: a734d48344aae1a4f0656b33260dcd73b4ea905815f84cd7d329d24330d01a43
               configuration:
@@ -78,7 +60,7 @@ spec:
                   domains:
                     - llm-demo.local
                   rate_limits:
-                    - api_key: 9353c0ddee1b
+                    - api_key: 9353c0ddee1b497f92ac0605bbd97dec.MIIBVAIBADANBgkqhkiG9w0BAQEFAASCAT4wggE6AgEAAkEAgi4CVONg7DSMVg68a8Pg6Ducrw29WVLvsgbwQk7d3hwqeU6+BosYnpRJ2Fl6xyYJ36gOZusM6JVnxgra/I0F9QIDAQABAkAcA/rMegKp0sVA3/r81jLYx7t4kORnDMo47fVWz9I/slFJRFz2HbQAdmm/Nzfz6ObU2JYF4KzVTRUo5MJT/HQBAiEAxFVAkpFupvtmZozxzHs43/DosWD2w6ZcpGCNKj2wSBUCIQCpvgR5GSWNshd8YsQMMFJSxtN+vTqpkVMlcquEcaJeYQIhAI+6PWhO8Stq9X7zhXwFZRCDw0U/T8bQ/hcT26Plvyw1AiA6du15fHTX2kiGmkomXJpuUndURv8mmpyF4Ho9MxqW4QIgKbQXjCRsDiBci8n0dsmzud9VaVIwbIMKzFIGIUZ9lhs=
                       max_concurrent: 2
                     - api_key: key_premium_001
                       max_concurrent: 5
