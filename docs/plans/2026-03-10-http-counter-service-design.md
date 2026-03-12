@@ -1,10 +1,12 @@
 # HTTP Counter Service for Distributed Concurrency Limiting Design
 
 > **Context:** This design preserves the existing Proxy-WASM SDK and distributed limiter abstraction while replacing the placeholder `counter_service` implementation with a real HTTP-based counter service backed by Redis.
+>
+> **Implementation Note:** The final implementation uses **asynchronous HTTP callouts** in the plugin HTTP context lifecycle rather than synchronous `DistributedStore.Acquire`. Requests pause while the counter service acquire decision is pending, then resume or reject based on the callback response. This approach is required by Proxy-WASM's async-only HTTP call model.
 
 **Goal:** Add a deployable distributed concurrency limiter that works in Envoy/Istio using standard Proxy-WASM HTTP call capabilities.
 
-**Architecture:** The WASM plugin continues to handle request interception, domain matching, API key extraction, and request lifecycle management. A new `httpCounterService` implementation behind `internal/store` calls an external HTTP service for acquire/release operations. That service performs atomic Redis operations using a counter plus lease-TTL model, while the plugin preserves the existing fallback-to-local behavior when the distributed store is unavailable.
+**Architecture:** The WASM plugin handles request interception, domain matching, API key extraction, and request lifecycle management. When `counter_service` mode is enabled, the plugin dispatches asynchronous HTTP callouts to an external counter service for acquire/release operations. That service performs atomic Redis operations using a counter plus lease-TTL model. The plugin preserves local fallback behavior when the distributed store is unavailable.
 
 **Tech Stack:** Go 1.22, `github.com/tetratelabs/proxy-wasm-go-sdk`, Redis, external HTTP counter service, existing limiter/plugin/config test suites.
 
@@ -12,17 +14,19 @@
 
 ## 1. Overall architecture and request flow
 
-Keep the current Proxy-WASM SDK and limiter structure unchanged. The only runtime behavior change inside the plugin is replacing the no-op implementation in `internal/store/client.go` with a real counter-service client.
+The plugin uses Proxy-WASM's asynchronous HTTP callout model for distributed acquire/release operations.
 
 Request flow:
 
 1. The plugin receives an HTTP request and runs normal host matching and bearer-token parsing.
-2. `DistributedLimiter.Acquire(apiKey)` calls the `DistributedStore` implementation.
-3. The store implementation sends a standard Proxy-WASM HTTP call to a configured cluster, for example `POST /acquire`.
-4. The external counter service executes an atomic Redis acquire operation.
-5. If acquire succeeds, the plugin receives a `lease_id` and returns a release closure.
-6. When the stream ends, the existing `OnHttpStreamDone` path invokes that release closure, which sends `POST /release`.
-7. If the counter service is unavailable, the store returns `limiter.ErrStoreUnavailable`, and the existing distributed limiter falls back to local mode.
+2. In `counter_service` mode, `OnHttpRequestHeaders` dispatches an async HTTP callout to `POST /acquire` and returns `ActionPause`.
+3. The external counter service executes an atomic Redis acquire operation.
+4. When the HTTP callback arrives, the plugin parses the response:
+   - If `allowed=true`, the plugin stores the `lease_id` and calls `ResumeHttpRequest()`.
+   - If `allowed=false`, the plugin sends a local rejection response.
+   - If the HTTP call fails (non-200 status, parse error, timeout), the plugin falls back to the local limiter and resumes if a slot is available.
+5. When the stream ends, `OnHttpStreamDone` dispatches a best-effort `POST /release` callout with the stored `lease_id`.
+6. The plugin does not wait for the release response; it is fire-and-forget.
 
 This keeps the plugin portable across Envoy/Istio deployments because the WASM side uses standard HTTP call capabilities rather than direct Redis access or vendor-specific host extensions.
 
@@ -93,30 +97,30 @@ Trade-off: a very long-running request may outlive its TTL and free the slot ear
 
 ## 3. WASM-side client integration
 
-The existing interface is already sufficient:
+The plugin uses **asynchronous HTTP callouts** in the HTTP context lifecycle rather than a synchronous `DistributedStore.Acquire` interface.
 
-```go
-Acquire(apiKey string, limit int) (func(), bool, error)
-Name() string
-```
+### Acquire flow
 
-So the plugin-side implementation only needs to translate HTTP responses into limiter semantics.
+In `OnHttpRequestHeaders`, when `counter_service` mode is enabled:
 
-Recommended result mapping:
-
-- HTTP 200 with `allowed=true` -> return `release func(), true, nil`
-- HTTP 200 with `allowed=false` -> return `nil, false, nil`
-- timeout, network error, malformed response, or 5xx -> return `nil, false, limiter.ErrStoreUnavailable`
-
-Only a clear distributed rejection should be treated as a normal limit denial. Any transport or service failure should be treated as store unavailability so the existing fallback path stays intact.
+1. The plugin marshals an acquire request body with `api_key`, `limit`, and `ttl_ms`.
+2. It dispatches `proxywasm.DispatchHttpCall` to the configured cluster and path.
+3. It returns `types.ActionPause` to pause the request.
+4. When the HTTP callback arrives, the plugin parses the response:
+   - HTTP 200 with `allowed=true` → store `lease_id`, call `proxywasm.ResumeHttpRequest()`
+   - HTTP 200 with `allowed=false` → send local rejection response
+   - Non-200 status, timeout, parse error → fall back to local limiter, resume if slot available
 
 ### Release behavior
 
-The release closure should issue a best-effort `POST /release` request.
+In `OnHttpStreamDone`, if a `lease_id` was stored from a successful acquire:
 
-Important constraint: in Proxy-WASM, end-of-stream cleanup is not a good place to depend on a guaranteed, synchronous remote confirmation. Therefore release failures should not affect the request outcome. The authoritative safety net is the lease TTL in Redis.
+1. The plugin marshals a release request body with `api_key` and `lease_id`.
+2. It dispatches a best-effort `POST /release` callout.
+3. The plugin does not wait for or check the release response.
+4. The authoritative safety net is the lease TTL in Redis.
 
-This aligns with the current project design, where availability is prioritized and the limiter already supports fallback to local mode.
+This aligns with the current project design, where availability is prioritized and the limiter supports fallback to local mode.
 
 ---
 
