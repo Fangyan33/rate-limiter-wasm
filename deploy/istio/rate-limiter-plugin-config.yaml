@@ -10,7 +10,10 @@ distributed_limit:
   backend: counter_service
   counter_service:
     cluster: ratelimit-service
-    timeout_ms: 200
+    acquire_path: /acquire
+    release_path: /release
+    timeout_ms: 5000
+    lease_ttl_ms: 30000
 error_response:
   status_code: 429
   message: Rate limit exceeded
