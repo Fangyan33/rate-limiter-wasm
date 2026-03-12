@@ -1,7 +1,9 @@
 package plugin
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 
 	"rate-limiter-wasm/internal/auth"
@@ -24,17 +26,21 @@ type vmContext struct {
 
 type rootContext struct {
 	types.DefaultPluginContext
-	cfg              config.Config
-	matcher          *matcher.DomainMatcher
-	limiter          requestLimiter
-	asyncDistributed bool
+	cfg                config.Config
+	matcher            *matcher.DomainMatcher
+	limiter            requestLimiter
+	limits             map[string]int
+	counterService     config.CounterServiceConfig
+	asyncDistributed   bool
 }
 
 type httpContext struct {
 	types.DefaultHttpContext
-	root           *rootContext
-	release        func()
-	pendingAcquire bool
+	root                *rootContext
+	release             func()
+	pendingAcquire      bool
+	distributedAPIKey   string
+	distributedLeaseID  string
 }
 
 func NewVMContext() types.VMContext {
@@ -82,6 +88,8 @@ func (r *rootContext) LoadConfiguration(data []byte) error {
 
 	r.cfg = cfg
 	r.matcher = domainMatcher
+	r.limits = limits
+	r.counterService = cfg.DistributedLimit.CounterService
 	r.asyncDistributed = cfg.DistributedLimit.Enabled &&
 		cfg.DistributedLimit.Backend == "counter_service"
 
@@ -122,10 +130,48 @@ func (h *httpContext) OnHttpRequestHeaders(numHeaders int, endOfStream bool) typ
 		return h.reject()
 	}
 
-	// When counter_service async mode is enabled, pause the request
-	// while the distributed acquire decision is pending.
+	// When counter_service async mode is enabled, dispatch an HTTP
+	// callout and pause the request until the callback arrives.
 	if h.root.asyncDistributed {
 		h.pendingAcquire = true
+		h.distributedAPIKey = apiKey
+
+		cs := h.root.counterService
+		limit := h.root.limits[apiKey]
+
+		body, _ := json.Marshal(struct {
+			APIKey string `json:"api_key"`
+			Limit  int    `json:"limit"`
+			TTLMS  int    `json:"ttl_ms"`
+		}{
+			APIKey: apiKey,
+			Limit:  limit,
+			TTLMS:  cs.LeaseTTLMS,
+		})
+
+		timeout := uint32(cs.TimeoutMS)
+		if timeout == 0 {
+			timeout = 5000
+		}
+
+		_, err := proxywasm.DispatchHttpCall(
+			cs.Cluster,
+			[][2]string{
+				{":method", "POST"},
+				{":path", cs.AcquirePath},
+				{":authority", cs.Cluster},
+				{"content-type", "application/json"},
+			},
+			body,
+			nil,
+			timeout,
+			h.onAcquireResponse,
+		)
+		if err != nil {
+			proxywasm.LogErrorf("dispatch acquire callout: %v", err)
+			return h.reject()
+		}
+
 		return types.ActionPause
 	}
 
@@ -142,6 +188,37 @@ func (h *httpContext) OnHttpStreamDone() {
 	if h.release != nil {
 		h.release()
 		h.release = nil
+	}
+}
+
+func (h *httpContext) onAcquireResponse(numHeaders, bodySize, numTrailers int) {
+	h.pendingAcquire = false
+
+	body, err := proxywasm.GetHttpCallResponseBody(0, math.MaxInt32)
+	if err != nil {
+		proxywasm.LogErrorf("read acquire response body: %v", err)
+		h.reject()
+		return
+	}
+
+	var resp struct {
+		Allowed bool   `json:"allowed"`
+		LeaseID string `json:"lease_id,omitempty"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		proxywasm.LogErrorf("parse acquire response: %v", err)
+		h.reject()
+		return
+	}
+
+	if !resp.Allowed {
+		h.reject()
+		return
+	}
+
+	h.distributedLeaseID = resp.LeaseID
+	if err := proxywasm.ResumeHttpRequest(); err != nil {
+		proxywasm.LogErrorf("resume http request: %v", err)
 	}
 }
 

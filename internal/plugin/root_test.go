@@ -281,6 +281,101 @@ error_response:
 	}
 }
 
+func TestPluginResumesRequestWhenCounterServiceAcquireSucceeds(t *testing.T) {
+	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
+  - api.example.com
+rate_limits:
+  - api_key: key_basic_001
+    max_concurrent: 1
+distributed_limit:
+  enabled: true
+  backend: counter_service
+  counter_service:
+    cluster: ratelimit-service
+    acquire_path: /acquire
+    release_path: /release
+    lease_ttl_ms: 30000
+error_response:
+  status_code: 429
+  message: Rate limit exceeded
+`))
+	defer reset()
+
+	contextID := host.InitializeHttpContext()
+	action := host.CallOnRequestHeaders(contextID, [][2]string{
+		{":authority", "api.example.com"},
+		{"authorization", "Bearer key_basic_001"},
+	}, false)
+	if action != types.ActionPause {
+		t.Fatalf("expected distributed acquire to pause request, got %v", action)
+	}
+
+	callouts := host.GetCalloutAttributesFromContext(contextID)
+	if len(callouts) != 1 {
+		t.Fatalf("expected one counter-service callout, got %d", len(callouts))
+	}
+	if callouts[0].Upstream != "ratelimit-service" {
+		t.Fatalf("unexpected callout upstream: %q", callouts[0].Upstream)
+	}
+
+	host.CallOnHttpCallResponse(callouts[0].CalloutID, [][2]string{{":status", "200"}}, nil, []byte(`{"allowed":true,"lease_id":"lease-123"}`))
+
+	if got := host.GetCurrentHttpStreamAction(contextID); got != types.ActionContinue {
+		t.Fatalf("expected request to resume after successful acquire, got %v", got)
+	}
+	if resp := host.GetSentLocalResponse(contextID); resp != nil {
+		t.Fatalf("expected no local response after successful acquire, got %#v", resp)
+	}
+}
+
+func TestPluginRejectsRequestWhenCounterServiceAcquireDenies(t *testing.T) {
+	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
+  - api.example.com
+rate_limits:
+  - api_key: key_basic_001
+    max_concurrent: 1
+distributed_limit:
+  enabled: true
+  backend: counter_service
+  counter_service:
+    cluster: ratelimit-service
+    acquire_path: /acquire
+    release_path: /release
+    lease_ttl_ms: 30000
+error_response:
+  status_code: 429
+  message: Rate limit exceeded
+`))
+	defer reset()
+
+	contextID := host.InitializeHttpContext()
+	action := host.CallOnRequestHeaders(contextID, [][2]string{
+		{":authority", "api.example.com"},
+		{"authorization", "Bearer key_basic_001"},
+	}, false)
+	if action != types.ActionPause {
+		t.Fatalf("expected distributed acquire to pause request, got %v", action)
+	}
+
+	callouts := host.GetCalloutAttributesFromContext(contextID)
+	if len(callouts) != 1 {
+		t.Fatalf("expected one counter-service callout, got %d", len(callouts))
+	}
+
+	host.CallOnHttpCallResponse(callouts[0].CalloutID, [][2]string{{":status", "200"}}, nil, []byte(`{"allowed":false}`))
+
+	resp := host.GetSentLocalResponse(contextID)
+	if resp == nil {
+		t.Fatal("expected local rejection after denied acquire")
+	}
+	if resp.StatusCode != 429 {
+		t.Fatalf("unexpected status code: got %d want 429", resp.StatusCode)
+	}
+	if string(resp.Data) != "Rate limit exceeded" {
+		t.Fatalf("unexpected response body: got %q want %q", string(resp.Data), "Rate limit exceeded")
+	}
+}
+
 func newHTTPHost(t *testing.T) (proxytest.HostEmulator, func()) {
 	t.Helper()
 
