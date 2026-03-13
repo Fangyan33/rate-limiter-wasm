@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -37,11 +38,14 @@ func (c *Client) Acquire(ctx context.Context, req AcquireRequest) (*AcquireResul
 	leaseID := uuid.New().String()
 
 	// Build Redis keys
-	counterKey := buildCounterKey(req.APIKey)
+	leasesKey := buildLeasesKey(req.APIKey)
 	leaseKey := buildLeaseKey(req.APIKey, leaseID)
 
+	// Get current timestamp in milliseconds
+	nowMs := time.Now().UnixMilli()
+
 	// Execute Lua script
-	result, err := c.rdb.Eval(ctx, acquireScript, []string{counterKey, leaseKey}, req.Limit, req.TTLMS).Result()
+	result, err := c.rdb.Eval(ctx, acquireScript, []string{leasesKey, leaseKey}, req.Limit, req.TTLMS, nowMs, leaseID).Result()
 	if err != nil {
 		return nil, wrapError(err)
 	}
@@ -72,11 +76,11 @@ func (c *Client) Acquire(ctx context.Context, req AcquireRequest) (*AcquireResul
 // Release releases a previously acquired concurrency slot
 func (c *Client) Release(ctx context.Context, req ReleaseRequest) (*ReleaseResult, error) {
 	// Build Redis keys
-	counterKey := buildCounterKey(req.APIKey)
+	leasesKey := buildLeasesKey(req.APIKey)
 	leaseKey := buildLeaseKey(req.APIKey, req.LeaseID)
 
 	// Execute Lua script
-	result, err := c.rdb.Eval(ctx, releaseScript, []string{counterKey, leaseKey}).Result()
+	result, err := c.rdb.Eval(ctx, releaseScript, []string{leasesKey, leaseKey}, req.LeaseID).Result()
 	if err != nil {
 		return nil, wrapError(err)
 	}

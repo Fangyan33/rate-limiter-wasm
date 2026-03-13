@@ -174,7 +174,7 @@ func TestRelease_DuplicateRelease(t *testing.T) {
 }
 
 func TestAcquireRelease_CounterAccuracy(t *testing.T) {
-	client, mr := setupTestRedis(t)
+	client, _ := setupTestRedis(t)
 	defer client.Close()
 
 	ctx := context.Background()
@@ -194,11 +194,14 @@ func TestAcquireRelease_CounterAccuracy(t *testing.T) {
 		leases = append(leases, result.LeaseID)
 	}
 
-	// Check counter value
-	counterKey := buildCounterKey(apiKey)
-	counter, _ := mr.Get(counterKey)
-	if counter != "3" {
-		t.Errorf("expected counter=3, got %s", counter)
+	// Check ZSET size
+	leasesKey := buildLeasesKey(apiKey)
+	size, err := client.rdb.ZCard(ctx, leasesKey).Result()
+	if err != nil {
+		t.Fatalf("ZCard failed: %v", err)
+	}
+	if size != 3 {
+		t.Errorf("expected ZSET size=3, got %d", size)
 	}
 
 	// Release 2 slots
@@ -212,10 +215,13 @@ func TestAcquireRelease_CounterAccuracy(t *testing.T) {
 		}
 	}
 
-	// Check counter value after release
-	counter, _ = mr.Get(counterKey)
-	if counter != "1" {
-		t.Errorf("expected counter=1 after releases, got %s", counter)
+	// Check ZSET size after release
+	size, err = client.rdb.ZCard(ctx, leasesKey).Result()
+	if err != nil {
+		t.Fatalf("ZCard failed: %v", err)
+	}
+	if size != 1 {
+		t.Errorf("expected ZSET size=1 after releases, got %d", size)
 	}
 }
 
@@ -243,7 +249,10 @@ func TestAcquire_LeaseTTLExpiry(t *testing.T) {
 		t.Error("lease key should exist immediately after acquire")
 	}
 
-	// Fast-forward time to expire the lease
+	// Wait for lease to expire (real time, not miniredis time)
+	time.Sleep(150 * time.Millisecond)
+
+	// Fast-forward miniredis time to expire the lease key
 	mr.FastForward(200 * time.Millisecond)
 
 	// Verify lease expired
@@ -251,11 +260,36 @@ func TestAcquire_LeaseTTLExpiry(t *testing.T) {
 		t.Error("lease key should have expired")
 	}
 
-	// Counter should still be 1 (lease expiry doesn't auto-decrement)
-	counterKey := buildCounterKey(apiKey)
-	counter, _ := mr.Get(counterKey)
-	if counter != "1" {
-		t.Errorf("expected counter=1 after lease expiry, got %s", counter)
+	// ZSET should still contain the expired lease (not yet cleaned)
+	leasesKey := buildLeasesKey(apiKey)
+	size, err := client.rdb.ZCard(ctx, leasesKey).Result()
+	if err != nil {
+		t.Fatalf("ZCard failed: %v", err)
+	}
+	if size != 1 {
+		t.Errorf("expected ZSET size=1 before cleanup, got %d", size)
+	}
+
+	// Next acquire should auto-clean expired leases
+	result2, err := client.Acquire(ctx, AcquireRequest{
+		APIKey: apiKey,
+		Limit:  5,
+		TTLMS:  30000,
+	})
+	if err != nil {
+		t.Fatalf("Second acquire failed: %v", err)
+	}
+	if !result2.Allowed {
+		t.Error("second acquire should succeed after expired lease cleanup")
+	}
+
+	// ZSET should now only contain the new lease (old one cleaned up)
+	size, err = client.rdb.ZCard(ctx, leasesKey).Result()
+	if err != nil {
+		t.Fatalf("ZCard failed: %v", err)
+	}
+	if size != 1 {
+		t.Errorf("expected ZSET size=1 after cleanup, got %d", size)
 	}
 }
 
