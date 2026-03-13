@@ -20,7 +20,14 @@ type Config struct {
 	RateLimits       []RateLimit            `yaml:"rate_limits"`
 	DistributedStore DistributedStoreConfig `yaml:"distributed_store"`
 	DistributedLimit DistributedLimitConfig `yaml:"distributed_limit"`
+	TokenStatistics  TokenStatisticsConfig  `yaml:"token_statistics"`
 	ErrorResponse    ErrorResponse          `yaml:"error_response"`
+}
+
+type TokenStatisticsConfig struct {
+	Enabled          bool `yaml:"enabled"`
+	InjectStreamUsage bool `yaml:"inject_stream_usage"`
+	MetricKeyLimit   int  `yaml:"metric_key_limit"`
 }
 
 type RateLimit struct {
@@ -118,6 +125,9 @@ func (c *Config) applyDefaults() {
 	if !c.DistributedLimit.CounterService.leaseTTLMSSet {
 		c.DistributedLimit.CounterService.LeaseTTLMS = defaultCounterServiceLeaseTTLMS
 	}
+	if c.TokenStatistics.MetricKeyLimit == 0 {
+		c.TokenStatistics.MetricKeyLimit = 5000
+	}
 }
 
 func (c *Config) Validate() error {
@@ -181,6 +191,10 @@ func (c *Config) Validate() error {
 
 	if c.ErrorResponse.StatusCode < 400 {
 		return fmt.Errorf("error_response.status_code must be >= 400")
+	}
+
+	if c.TokenStatistics.MetricKeyLimit <= 0 {
+		return fmt.Errorf("token_statistics.metric_key_limit must be > 0")
 	}
 
 	return nil

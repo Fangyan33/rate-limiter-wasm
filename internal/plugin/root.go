@@ -1,9 +1,11 @@
 package plugin
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 
 	"rate-limiter-wasm/internal/auth"
@@ -26,21 +28,32 @@ type vmContext struct {
 
 type rootContext struct {
 	types.DefaultPluginContext
-	cfg                config.Config
-	matcher            *matcher.DomainMatcher
-	limiter            requestLimiter
-	limits             map[string]int
-	counterService     config.CounterServiceConfig
-	asyncDistributed   bool
+	cfg              config.Config
+	matcher          *matcher.DomainMatcher
+	limiter          requestLimiter
+	limits           map[string]int
+	counterService   config.CounterServiceConfig
+	asyncDistributed bool
+
+	metricPromptTokens     map[string]proxywasm.MetricCounter
+	metricCompletionTokens map[string]proxywasm.MetricCounter
+	metricParseErrors      map[string]proxywasm.MetricCounter
+	metricKeys             map[string]struct{}
+	metricKeyCount         int
+	metricKeyLimit         int
 }
 
 type httpContext struct {
 	types.DefaultHttpContext
-	root                *rootContext
-	release             func()
-	pendingAcquire      bool
-	distributedAPIKey   string
-	distributedLeaseID  string
+	root               *rootContext
+	release            func()
+	pendingAcquire     bool
+	distributedAPIKey  string
+	distributedLeaseID string
+
+	tokenStatsEnabled bool
+	domain            string
+	uid               string
 }
 
 func NewVMContext() types.VMContext {
@@ -93,6 +106,14 @@ func (r *rootContext) LoadConfiguration(data []byte) error {
 	r.asyncDistributed = cfg.DistributedLimit.Enabled &&
 		cfg.DistributedLimit.Backend == "counter_service"
 
+	// Token statistics metrics.
+	r.metricPromptTokens = make(map[string]proxywasm.MetricCounter)
+	r.metricCompletionTokens = make(map[string]proxywasm.MetricCounter)
+	r.metricParseErrors = make(map[string]proxywasm.MetricCounter)
+	r.metricKeys = make(map[string]struct{})
+	r.metricKeyCount = 0
+	r.metricKeyLimit = cfg.TokenStatistics.MetricKeyLimit
+
 	requestLimiter, err := newRequestLimiter(cfg, limits)
 	if err != nil {
 		return fmt.Errorf("build request limiter: %w", err)
@@ -120,9 +141,22 @@ func (h *httpContext) OnHttpRequestHeaders(numHeaders int, endOfStream bool) typ
 		return types.ActionContinue
 	}
 
+	h.domain = normalizeHost(host)
+
 	authorization, err := proxywasm.GetHttpRequestHeader("authorization")
 	if err != nil {
 		return h.reject()
+	}
+
+	if h.root.cfg.TokenStatistics.Enabled {
+		uid, err := parseUIDFromJWT(authorization)
+		if err != nil {
+			proxywasm.LogWarnf("token statistics disabled: parse uid from jwt: %v", err)
+			h.tokenStatsEnabled = false
+		} else {
+			h.uid = uid
+			h.tokenStatsEnabled = true
+		}
 	}
 
 	apiKey, err := auth.ParseBearerToken(authorization)
@@ -372,4 +406,68 @@ func normalizeHost(host string) string {
 		return host[:idx]
 	}
 	return host
+}
+
+const (
+	maxAuthorizationHeaderBytes = 16 * 1024
+	maxUIDBytes                 = 64
+)
+
+func parseUIDFromJWT(authorizationHeader string) (string, error) {
+	if len(authorizationHeader) > maxAuthorizationHeaderBytes {
+		return "", fmt.Errorf("authorization header too large")
+	}
+
+	jwt, err := auth.ParseBearerToken(authorizationHeader)
+	if err != nil {
+		return "", err
+	}
+
+	parts := strings.Split(jwt, ".")
+	if len(parts) != 3 {
+		return "", fmt.Errorf("invalid jwt format")
+	}
+
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", fmt.Errorf("decode jwt payload: %w", err)
+	}
+
+	var claims map[string]any
+	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
+		return "", fmt.Errorf("parse jwt payload: %w", err)
+	}
+
+	rawUID, ok := claims["uid"]
+	if !ok {
+		return "", fmt.Errorf("missing uid")
+	}
+
+	var uid string
+	switch v := rawUID.(type) {
+	case string:
+		uid = v
+	case float64:
+		// json.Unmarshal uses float64 for all JSON numbers.
+		if v != math.Trunc(v) {
+			return "", fmt.Errorf("uid must be an integer")
+		}
+		uid = strconv.FormatInt(int64(v), 10)
+	default:
+		return "", fmt.Errorf("unsupported uid type")
+	}
+
+	uid = strings.TrimSpace(uid)
+	if uid == "" {
+		return "", fmt.Errorf("uid must not be empty")
+	}
+	if len(uid) > maxUIDBytes {
+		return "", fmt.Errorf("uid too long")
+	}
+
+	if strings.ContainsAny(uid, "\n\r\t") {
+		return "", fmt.Errorf("uid contains invalid whitespace")
+	}
+
+	return uid, nil
 }

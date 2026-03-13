@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"reflect"
 	"testing"
 
 	"rate-limiter-wasm/internal/config"
@@ -283,5 +284,74 @@ rate_limits:
 
 	if cfg.ErrorResponse.Message == "" {
 		t.Fatal("expected default error_response.message to be populated")
+	}
+}
+
+func TestParseConfigTokenStatisticsDefaults(t *testing.T) {
+	cfg, err := config.Parse([]byte(`domains:
+  - api.example.com
+rate_limits:
+  - api_key: key_basic_001
+    max_concurrent: 10
+`))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	tokenStats := reflect.ValueOf(cfg).FieldByName("TokenStatistics")
+	if !tokenStats.IsValid() {
+		t.Fatal("expected Config to define TokenStatistics")
+	}
+
+	enabled := tokenStats.FieldByName("Enabled")
+	if !enabled.IsValid() || enabled.Kind() != reflect.Bool {
+		t.Fatalf("expected TokenStatistics.Enabled to be bool, got %v", enabled.Kind())
+	}
+	if enabled.Bool() {
+		t.Fatal("expected token_statistics.enabled default false")
+	}
+
+	metricKeyLimit := tokenStats.FieldByName("MetricKeyLimit")
+	if !metricKeyLimit.IsValid() || metricKeyLimit.Kind() != reflect.Int {
+		t.Fatalf("expected TokenStatistics.MetricKeyLimit to be int, got %v", metricKeyLimit.Kind())
+	}
+	if metricKeyLimit.Int() != 5000 {
+		t.Fatalf("expected default metric_key_limit=5000, got %d", metricKeyLimit.Int())
+	}
+}
+
+func TestParseConfigTokenStatisticsOverridesMetricKeyLimit(t *testing.T) {
+	cfg, err := config.Parse([]byte(`domains:
+  - api.example.com
+rate_limits:
+  - api_key: key_basic_001
+    max_concurrent: 10
+token_statistics:
+  enabled: true
+  metric_key_limit: 123
+`))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	tokenStats := reflect.ValueOf(cfg).FieldByName("TokenStatistics")
+	if !tokenStats.IsValid() {
+		t.Fatal("expected Config to define TokenStatistics")
+	}
+
+	enabled := tokenStats.FieldByName("Enabled")
+	if !enabled.IsValid() || enabled.Kind() != reflect.Bool {
+		t.Fatalf("expected TokenStatistics.Enabled to be bool, got %v", enabled.Kind())
+	}
+	if !enabled.Bool() {
+		t.Fatal("expected token_statistics.enabled true")
+	}
+
+	metricKeyLimit := tokenStats.FieldByName("MetricKeyLimit")
+	if !metricKeyLimit.IsValid() || metricKeyLimit.Kind() != reflect.Int {
+		t.Fatalf("expected TokenStatistics.MetricKeyLimit to be int, got %v", metricKeyLimit.Kind())
+	}
+	if metricKeyLimit.Int() != 123 {
+		t.Fatalf("expected metric_key_limit=123, got %d", metricKeyLimit.Int())
 	}
 }
