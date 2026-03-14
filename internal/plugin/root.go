@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -54,6 +55,15 @@ type httpContext struct {
 	tokenStatsEnabled bool
 	domain            string
 	uid               string
+
+	// Token statistics state.
+	promptTokens        int
+	completionTokens    int
+	streamParseErrors   int
+	responseContentType string
+
+	// Buffer for SSE incremental parsing.
+	sseBuf []byte
 }
 
 func NewVMContext() types.VMContext {
@@ -157,11 +167,19 @@ func (h *httpContext) OnHttpRequestHeaders(numHeaders int, endOfStream bool) typ
 			h.uid = uid
 			h.tokenStatsEnabled = true
 		}
+	} else {
+		h.tokenStatsEnabled = false
 	}
 
 	apiKey, err := auth.ParseBearerToken(authorization)
 	if err != nil {
 		return h.reject()
+	}
+
+	// If we might mutate the request body, remove content-length in advance.
+	// (Required by proxy-wasm-go-sdk when the body size can change.)
+	if h.root.cfg.TokenStatistics.Enabled && h.root.cfg.TokenStatistics.InjectStreamUsage && h.tokenStatsEnabled {
+		_ = proxywasm.RemoveHttpRequestHeader("content-length")
 	}
 
 	// When counter_service async mode is enabled, dispatch an HTTP
@@ -218,14 +236,187 @@ func (h *httpContext) OnHttpRequestHeaders(numHeaders int, endOfStream bool) typ
 	return types.ActionContinue
 }
 
+func (h *httpContext) OnHttpRequestBody(bodySize int, endOfStream bool) types.Action {
+	if h.root == nil {
+		return types.ActionContinue
+	}
+	cfg := h.root.cfg
+	if !cfg.TokenStatistics.Enabled || !cfg.TokenStatistics.InjectStreamUsage || !h.tokenStatsEnabled {
+		return types.ActionContinue
+	}
+
+	// Only mutate when the full request body is available.
+	if !endOfStream {
+		return types.ActionContinue
+	}
+
+	body, err := proxywasm.GetHttpRequestBody(0, bodySize)
+	if err != nil || len(body) == 0 {
+		return types.ActionContinue
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return types.ActionContinue
+	}
+
+	streamVal, ok := payload["stream"]
+	if !ok {
+		return types.ActionContinue
+	}
+	stream, ok := streamVal.(bool)
+	if !ok || !stream {
+		return types.ActionContinue
+	}
+
+	soRaw, hasSO := payload["stream_options"]
+	if hasSO {
+		if so, ok := soRaw.(map[string]any); ok {
+			if v, ok := so["include_usage"].(bool); ok && v {
+				return types.ActionContinue
+			}
+		}
+	}
+
+	payload["stream_options"] = map[string]any{"include_usage": true}
+	mutated, err := json.Marshal(payload)
+	if err != nil {
+		return types.ActionContinue
+	}
+
+	if err := proxywasm.ReplaceHttpRequestBody(mutated); err != nil {
+		return types.ActionContinue
+	}
+	return types.ActionContinue
+}
+
+func (h *httpContext) OnHttpResponseHeaders(numHeaders int, endOfStream bool) types.Action {
+	if h.root == nil {
+		return types.ActionContinue
+	}
+	if !h.root.cfg.TokenStatistics.Enabled || !h.tokenStatsEnabled {
+		return types.ActionContinue
+	}
+	ct, err := proxywasm.GetHttpResponseHeader("content-type")
+	if err == nil {
+		h.responseContentType = strings.ToLower(strings.TrimSpace(ct))
+	}
+	return types.ActionContinue
+}
+
+func (h *httpContext) OnHttpResponseBody(bodySize int, endOfStream bool) types.Action {
+	if h.root == nil {
+		return types.ActionContinue
+	}
+	if !h.root.cfg.TokenStatistics.Enabled || !h.tokenStatsEnabled {
+		return types.ActionContinue
+	}
+
+	// For non-SSE, we only parse when the full body is available.
+	if !isEventStream(h.responseContentType) {
+		if !endOfStream {
+			return types.ActionContinue
+		}
+		body, err := proxywasm.GetHttpResponseBody(0, bodySize)
+		if err != nil {
+			h.streamParseErrors++
+			return types.ActionContinue
+		}
+		prompt, completion, ok := parseUsageFromJSON(body)
+		if !ok {
+			h.streamParseErrors++
+			return types.ActionContinue
+		}
+		h.promptTokens += prompt
+		h.completionTokens += completion
+		return types.ActionContinue
+	}
+
+	// SSE incremental parsing.
+	chunk, err := proxywasm.GetHttpResponseBody(0, bodySize)
+	if err != nil {
+		h.streamParseErrors++
+		return types.ActionContinue
+	}
+	h.parseSSEChunk(chunk)
+	return types.ActionContinue
+}
+
+func isEventStream(contentType string) bool {
+	return strings.Contains(contentType, "text/event-stream")
+}
+
+func parseUsageFromJSON(body []byte) (promptTokens int, completionTokens int, ok bool) {
+	var payload struct {
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return 0, 0, false
+	}
+	if payload.Usage.PromptTokens == 0 && payload.Usage.CompletionTokens == 0 {
+		return 0, 0, false
+	}
+	return payload.Usage.PromptTokens, payload.Usage.CompletionTokens, true
+}
+
+func (h *httpContext) parseSSEChunk(chunk []byte) {
+	// Append and split by newlines.
+	h.sseBuf = append(h.sseBuf, chunk...)
+
+	for {
+		idx := bytes.IndexByte(h.sseBuf, '\n')
+		if idx < 0 {
+			// Keep incomplete line.
+			if len(h.sseBuf) > 64*1024 {
+				// Prevent unbounded growth on malformed streams.
+				h.sseBuf = h.sseBuf[:0]
+				h.streamParseErrors++
+			}
+			return
+		}
+
+		line := bytes.TrimSpace(h.sseBuf[:idx])
+		h.sseBuf = h.sseBuf[idx+1:]
+		if len(line) == 0 {
+			continue
+		}
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		data := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		if bytes.Equal(data, []byte("[DONE]")) {
+			continue
+		}
+		prompt, completion, ok := parseUsageFromJSON(data)
+		if !ok {
+			// Not all SSE frames carry usage; treat parse errors only when JSON is invalid.
+			var tmp any
+			if err := json.Unmarshal(data, &tmp); err != nil {
+				h.streamParseErrors++
+			}
+			continue
+		}
+		h.promptTokens += prompt
+		h.completionTokens += completion
+	}
+}
+
 func (h *httpContext) OnHttpStreamDone() {
-	// Release local limiter slot if acquired
+	// Release local limiter slot if acquired.
 	if h.release != nil {
 		h.release()
 		h.release = nil
 	}
 
-	// Dispatch best-effort distributed release if we have a lease
+	// Flush token statistics.
+	if h.root != nil && h.root.cfg.TokenStatistics.Enabled && h.tokenStatsEnabled {
+		h.updateTokenMetrics()
+	}
+
+	// Dispatch best-effort distributed release if we have a lease.
 	if h.distributedLeaseID != "" && h.root != nil && h.root.asyncDistributed {
 		cs := h.root.counterService
 		body, _ := json.Marshal(struct {
@@ -253,7 +444,7 @@ func (h *httpContext) OnHttpStreamDone() {
 			nil,
 			timeout,
 			func(numHeaders, bodySize, numTrailers int) {
-				// Best-effort release, ignore response
+				// Best-effort release, ignore response.
 			},
 		)
 		if err != nil {
@@ -263,6 +454,93 @@ func (h *httpContext) OnHttpStreamDone() {
 		h.distributedLeaseID = ""
 	}
 }
+
+func (h *httpContext) updateTokenMetrics() {
+	if h.root == nil {
+		return
+	}
+
+	domain := sanitizeMetricValue(h.domain)
+	uid := sanitizeMetricValue(h.uid)
+	uid, key := h.root.ensureMetricKey(domain, uid)
+
+	if h.promptTokens > 0 {
+		c := h.root.getPromptCounter(domain, uid, key)
+		c.Increment(uint64(h.promptTokens))
+	}
+	if h.completionTokens > 0 {
+		c := h.root.getCompletionCounter(domain, uid, key)
+		c.Increment(uint64(h.completionTokens))
+	}
+	if h.streamParseErrors > 0 {
+		c := h.root.getParseErrorsCounter(domain, uid, key)
+		c.Increment(uint64(h.streamParseErrors))
+	}
+}
+
+func sanitizeMetricValue(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "_"
+	}
+	return strings.Map(func(r rune) rune {
+		if r > 127 {
+			return '_'
+		}
+		switch r {
+		case ';', '=', '|', '\n', '\r', '\t', ' ':
+			return '_'
+		default:
+			return r
+		}
+	}, v)
+}
+
+func (r *rootContext) ensureMetricKey(domain, uid string) (finalUID string, key string) {
+	key = domain + "|" + uid
+	if _, ok := r.metricKeys[key]; ok {
+		return uid, key
+	}
+
+	// Existing key budget exhausted: overflow to __other__.
+	if r.metricKeyCount >= r.metricKeyLimit {
+		finalUID = "__other__"
+		key = domain + "|" + finalUID
+		return finalUID, key
+	}
+
+	r.metricKeys[key] = struct{}{}
+	r.metricKeyCount++
+	return uid, key
+}
+
+func (r *rootContext) getPromptCounter(domain, uid, key string) proxywasm.MetricCounter {
+	if c, ok := r.metricPromptTokens[key]; ok {
+		return c
+	}
+	c := proxywasm.DefineCounterMetric(fmt.Sprintf("llm_prompt_tokens_total;domain=%s;uid=%s;", domain, uid))
+	r.metricPromptTokens[key] = c
+	return c
+}
+
+func (r *rootContext) getCompletionCounter(domain, uid, key string) proxywasm.MetricCounter {
+	if c, ok := r.metricCompletionTokens[key]; ok {
+		return c
+	}
+	c := proxywasm.DefineCounterMetric(fmt.Sprintf("llm_completion_tokens_total;domain=%s;uid=%s;", domain, uid))
+	r.metricCompletionTokens[key] = c
+	return c
+}
+
+func (r *rootContext) getParseErrorsCounter(domain, uid, key string) proxywasm.MetricCounter {
+	if c, ok := r.metricParseErrors[key]; ok {
+		return c
+	}
+	c := proxywasm.DefineCounterMetric(fmt.Sprintf("llm_stream_parse_errors_total;domain=%s;uid=%s;", domain, uid))
+	r.metricParseErrors[key] = c
+	return c
+}
+
 
 func (h *httpContext) onAcquireResponse(numHeaders, bodySize, numTrailers int) {
 	h.pendingAcquire = false

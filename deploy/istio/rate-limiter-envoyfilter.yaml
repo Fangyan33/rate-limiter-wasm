@@ -8,6 +8,18 @@ spec:
     labels:
       app: istio-ingressgateway
   configPatches:
+    - applyTo: BOOTSTRAP
+      match:
+        context: GATEWAY
+      patch:
+        operation: MERGE
+        value:
+          stats_config:
+            stats_tags:
+              - tag_name: domain
+                regex: ";domain=([^;]+);"
+              - tag_name: uid
+                regex: ";uid=([^;]+);"
     - applyTo: CLUSTER
       match:
         context: GATEWAY
@@ -64,6 +76,10 @@ spec:
                       max_concurrent: 2
                     - api_key: key_premium_001
                       max_concurrent: 5
+                  token_statistics:
+                    enabled: true
+                    inject_stream_usage: true
+                    metric_key_limit: 5000
                   distributed_limit:
                     enabled: true
                     backend: counter_service

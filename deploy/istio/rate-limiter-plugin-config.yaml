@@ -5,6 +5,10 @@ rate_limits:
     max_concurrent: 2
   - api_key: key_premium_001
     max_concurrent: 5
+token_statistics:
+  enabled: true
+  inject_stream_usage: true
+  metric_key_limit: 5000
 distributed_limit:
   enabled: true
   backend: counter_service
