@@ -37,6 +37,7 @@ data:
 
             rewrite ^(.*)$ /api/paas/v4/chat/completions break;
             proxy_set_header Host open.bigmodel.cn;
+            proxy_set_header Authorization "Bearer 9353c0ddee1b497f92ac0605bbd97dec.MIIBVAIBADANBgkqhkiG9w0BAQEFAASCAT4wggE6AgEAAkEAgi4CVONg7DSMVg68a8Pg6Ducrw29WVLvsgbwQk7d3hwqeU6+BosYnpRJ2Fl6xyYJ36gOZusM6JVnxgra/I0F9QIDAQABAkAcA/rMegKp0sVA3/r81jLYx7t4kORnDMo47fVWz9I/slFJRFz2HbQAdmm/Nzfz6ObU2JYF4KzVTRUo5MJT/HQBAiEAxFVAkpFupvtmZozxzHs43/DosWD2w6ZcpGCNKj2wSBUCIQCpvgR5GSWNshd8YsQMMFJSxtN+vTqpkVMlcquEcaJeYQIhAI+6PWhO8Stq9X7zhXwFZRCDw0U/T8bQ/hcT26Plvyw1AiA6du15fHTX2kiGmkomXJpuUndURv8mmpyF4Ho9MxqW4QIgKbQXjCRsDiBci8n0dsmzud9VaVIwbIMKzFIGIUZ9lhs=";
 
             # --- 关键配置 (针对HTTPS后端) ---
             

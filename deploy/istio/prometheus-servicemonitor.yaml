@@ -1,0 +1,36 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: istio-ingressgateway-llm-metrics
+  namespace: istio-system
+  labels:
+    app: istio-ingressgateway
+spec:
+  selector:
+    matchLabels:
+      app: istio-ingressgateway
+  endpoints:
+    - port: http-envoy-prom
+      interval: 15s
+      path: /stats/prometheus
+      metricRelabelings:
+        # 提取 domain 标签
+        # 匹配格式: llm_*_total_domain_<domain>_uid_<uid>
+        # 例如: llm_completion_tokens_total_domain_llm_demo_local_uid_sfe_platform
+        - sourceLabels: [__name__]
+          regex: '(llm_.+_total)_domain_([^_]+(?:_[^_]+)*)_uid_.+'
+          targetLabel: domain
+          replacement: '${2}'
+
+        # 提取 uid 标签
+        - sourceLabels: [__name__]
+          regex: 'llm_.+_total_domain_.+_uid_(.+)'
+          targetLabel: uid
+          replacement: '${1}'
+
+        # 恢复原始指标名（去掉 _domain_*_uid_* 后缀）
+        # 将 llm_completion_tokens_total_domain_*_uid_* 转换为 llm_completion_tokens_total
+        - sourceLabels: [__name__]
+          regex: '(llm_.+_total)_domain_.+_uid_.+'
+          targetLabel: __name__
+          replacement: '${1}'

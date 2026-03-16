@@ -8,18 +8,6 @@ spec:
     labels:
       app: istio-ingressgateway
   configPatches:
-    - applyTo: BOOTSTRAP
-      match:
-        context: GATEWAY
-      patch:
-        operation: MERGE
-        value:
-          stats_config:
-            stats_tags:
-              - tag_name: domain
-                regex: ";domain=([^;]+);"
-              - tag_name: uid
-                regex: ";uid=([^;]+);"
     - applyTo: CLUSTER
       match:
         context: GATEWAY
@@ -65,14 +53,14 @@ spec:
                       uri: http://nginx-file-server-svc.default.svc.cluster.local/rate-limiter.wasm
                       cluster: outbound|80||nginx-file-server-svc.default.svc.cluster.local
                       timeout: 10s
-                    sha256: a734d48344aae1a4f0656b33260dcd73b4ea905815f84cd7d329d24330d01a43
+                    sha256: b4eb0355bb280fca25bd4f7bc5f4cf2590b78eeb3bc0294ea12db28b61071f01
               configuration:
                 "@type": type.googleapis.com/google.protobuf.StringValue
                 value: |
                   domains:
                     - llm-demo.local
                   rate_limits:
-                    - api_key: 9353c0ddee1b497f92ac0605bbd97dec.MIIBVAIBADANBgkqhkiG9w0BAQEFAASCAT4wggE6AgEAAkEAgi4CVONg7DSMVg68a8Pg6Ducrw29WVLvsgbwQk7d3hwqeU6+BosYnpRJ2Fl6xyYJ36gOZusM6JVnxgra/I0F9QIDAQABAkAcA/rMegKp0sVA3/r81jLYx7t4kORnDMo47fVWz9I/slFJRFz2HbQAdmm/Nzfz6ObU2JYF4KzVTRUo5MJT/HQBAiEAxFVAkpFupvtmZozxzHs43/DosWD2w6ZcpGCNKj2wSBUCIQCpvgR5GSWNshd8YsQMMFJSxtN+vTqpkVMlcquEcaJeYQIhAI+6PWhO8Stq9X7zhXwFZRCDw0U/T8bQ/hcT26Plvyw1AiA6du15fHTX2kiGmkomXJpuUndURv8mmpyF4Ho9MxqW4QIgKbQXjCRsDiBci8n0dsmzud9VaVIwbIMKzFIGIUZ9lhs=
+                    - api_key: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsInVpZCI6InNmZS1wbGF0Zm9ybSIsImlhdCI6MTUxNjIzOTAyMn0.ii5xh3ikEg7cFWC9EVxNOsZRKa6phJImOf3vI6LSZuI
                       max_concurrent: 2
                     - api_key: key_premium_001
                       max_concurrent: 5
