@@ -11,25 +11,32 @@ import (
 	"rate-limiter-wasm/internal/counter-service/redis"
 )
 
-func setupTestHandler(t *testing.T) (*Handler, *miniredis.Miniredis) {
+func setupTestHandler(t *testing.T) (*AcquireHandler, *ReleaseHandler, *miniredis.Miniredis) {
 	t.Helper()
 
 	mr := miniredis.RunT(t)
-	client, err := redis.NewClient(mr.Addr(), "", 0, 10, 3)
+	client, err := redis.NewClient(redis.Config{
+		Addr:      mr.Addr(),
+		KeyPrefix: "rl:",
+	})
 	if err != nil {
 		t.Fatalf("failed to create redis client: %v", err)
 	}
 
-	handler := NewHandler(client)
-	return handler, mr
+	acquireHandler := NewAcquireHandler(client)
+	releaseHandler := NewReleaseHandler(client)
+	return acquireHandler, releaseHandler, mr
 }
 
 func TestAcquireHandler_Success(t *testing.T) {
-	handler, _ := setupTestHandler(t)
+	handler, _, mr := setupTestHandler(t)
+
+	mr.HSet("rl:config:api.example.com:test-key", "max_concurrent", "5")
+	mr.HSet("rl:config:api.example.com:test-key", "enabled", "true")
 
 	reqBody := map[string]interface{}{
+		"domain": "api.example.com",
 		"api_key": "test-key",
-		"limit":   5,
 		"ttl_ms":  30000,
 	}
 	body, _ := json.Marshal(reqBody)
@@ -38,7 +45,7 @@ func TestAcquireHandler_Success(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
-	handler.Acquire(w, req)
+	handler.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d", w.Code)
@@ -59,11 +66,14 @@ func TestAcquireHandler_Success(t *testing.T) {
 }
 
 func TestAcquireHandler_LimitReached(t *testing.T) {
-	handler, _ := setupTestHandler(t)
+	handler, _, mr := setupTestHandler(t)
+
+	mr.HSet("rl:config:api.example.com:test-key", "max_concurrent", "2")
+	mr.HSet("rl:config:api.example.com:test-key", "enabled", "true")
 
 	reqBody := map[string]interface{}{
+		"domain": "api.example.com",
 		"api_key": "test-key",
-		"limit":   2,
 		"ttl_ms":  30000,
 	}
 
@@ -73,7 +83,7 @@ func TestAcquireHandler_LimitReached(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/acquire", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
-		handler.Acquire(w, req)
+		handler.ServeHTTP(w, req)
 
 		if w.Code != http.StatusOK {
 			t.Fatalf("acquire %d failed with status %d", i+1, w.Code)
@@ -86,10 +96,10 @@ func TestAcquireHandler_LimitReached(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
-	handler.Acquire(w, req)
+	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status 200, got %d", w.Code)
+	if w.Code != 429 {
+		t.Errorf("expected status 429, got %d", w.Code)
 	}
 
 	var resp map[string]interface{}
@@ -105,13 +115,13 @@ func TestAcquireHandler_LimitReached(t *testing.T) {
 }
 
 func TestAcquireHandler_InvalidJSON(t *testing.T) {
-	handler, _ := setupTestHandler(t)
+	handler, _, _ := setupTestHandler(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/acquire", bytes.NewReader([]byte("invalid json")))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
-	handler.Acquire(w, req)
+	handler.ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected status 400, got %d", w.Code)
@@ -119,33 +129,33 @@ func TestAcquireHandler_InvalidJSON(t *testing.T) {
 }
 
 func TestAcquireHandler_ValidationError(t *testing.T) {
-	handler, _ := setupTestHandler(t)
+	handler, _, _ := setupTestHandler(t)
 
 	tests := []struct {
 		name    string
 		reqBody map[string]interface{}
 	}{
 		{
-			name: "empty api_key",
+			name: "empty domain",
 			reqBody: map[string]interface{}{
-				"api_key": "",
-				"limit":   5,
+				"domain": "",
+				"api_key": "test-key",
 				"ttl_ms":  30000,
 			},
 		},
 		{
-			name: "invalid limit",
+			name: "empty api_key",
 			reqBody: map[string]interface{}{
-				"api_key": "test-key",
-				"limit":   0,
+				"domain": "api.example.com",
+				"api_key": "",
 				"ttl_ms":  30000,
 			},
 		},
 		{
 			name: "invalid ttl_ms",
 			reqBody: map[string]interface{}{
+				"domain": "api.example.com",
 				"api_key": "test-key",
-				"limit":   5,
 				"ttl_ms":  0,
 			},
 		},
@@ -158,7 +168,7 @@ func TestAcquireHandler_ValidationError(t *testing.T) {
 			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
 
-			handler.Acquire(w, req)
+			handler.ServeHTTP(w, req)
 
 			if w.Code != http.StatusBadRequest {
 				t.Errorf("expected status 400, got %d", w.Code)
@@ -168,14 +178,14 @@ func TestAcquireHandler_ValidationError(t *testing.T) {
 }
 
 func TestAcquireHandler_RedisNetworkError(t *testing.T) {
-	handler, mr := setupTestHandler(t)
+	handler, _, mr := setupTestHandler(t)
 
 	// Close miniredis to simulate network error
 	mr.Close()
 
 	reqBody := map[string]interface{}{
+		"domain": "api.example.com",
 		"api_key": "test-key",
-		"limit":   5,
 		"ttl_ms":  30000,
 	}
 	body, _ := json.Marshal(reqBody)
@@ -184,7 +194,7 @@ func TestAcquireHandler_RedisNetworkError(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
-	handler.Acquire(w, req)
+	handler.ServeHTTP(w, req)
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected status 503, got %d", w.Code)

@@ -30,19 +30,15 @@ error_response:
   message: Rate limit exceeded
 ```
 
-### 2. 分布式限流模式（Counter Service）
+### 2. 分布式限流模式（Counter Service + Redis）
 
-使用异步 HTTP 调用与 Counter Service 通信，实现跨多个 Envoy 实例的分布式限流。
+使用异步 HTTP 调用与 Counter Service 通信，实现跨多个 Envoy 实例的分布式限流。限流配置存储在 Redis 中，支持动态更新，无需重启插件。
 
 配置示例：
 ```yaml
 domains:
   - api.example.com
-rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 2
-  - api_key: key_premium_001
-    max_concurrent: 5
+  - "*.example.com"  # 支持通配符域名
 distributed_limit:
   enabled: true
   backend: counter_service
@@ -57,6 +53,8 @@ error_response:
   message: Rate limit exceeded
 ```
 
+**注意：** 分布式模式下，`rate_limits` 配置项已废弃。所有限流配置通过 Counter Service 的配置管理 API 动态管理，存储在 Redis 中。
+
 #### Counter Service 配置说明
 
 - `cluster`: Envoy 集群名称，指向 Counter Service
@@ -64,6 +62,54 @@ error_response:
 - `release_path`: 释放限流槽位的 API 路径
 - `timeout_ms`: HTTP 调用超时时间（毫秒）
 - `lease_ttl_ms`: 租约 TTL（毫秒），防止槽位泄漏
+
+#### Redis 配置存储架构
+
+限流配置按 `domain + api_key` 维度存储在 Redis Hash 中：
+
+**配置键格式：** `rl:config:{domain}:{api_key}`
+
+**配置字段：**
+- `max_concurrent`: 最大并发数
+- `enabled`: 是否启用（true/false）
+- `tier`: 可选，用户层级标识（如 basic, premium, enterprise）
+
+**通配符匹配优先级：**
+1. 精确匹配：`rl:config:api.example.com:key001`
+2. 父域名通配：`rl:config:*.example.com:key001`
+3. 全局通配：`rl:config:*:key001`
+
+#### 配置管理 API
+
+Counter Service 提供 RESTful API 用于管理限流配置：
+
+**创建/更新配置：**
+```bash
+curl -X PUT http://counter-service:8080/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "domain": "api.example.com",
+    "api_key": "key_basic_001",
+    "max_concurrent": 2,
+    "enabled": true,
+    "tier": "basic"
+  }'
+```
+
+**查询单个配置：**
+```bash
+curl "http://counter-service:8080/config?domain=api.example.com&api_key=key_basic_001"
+```
+
+**列出所有配置：**
+```bash
+curl "http://counter-service:8080/configs"
+```
+
+**删除配置：**
+```bash
+curl -X DELETE "http://counter-service:8080/config?domain=api.example.com&api_key=key_basic_001"
+```
 
 #### Counter Service API 契约
 
@@ -73,8 +119,8 @@ POST /acquire
 Content-Type: application/json
 
 {
+  "domain": "api.example.com",
   "api_key": "key_basic_001",
-  "limit": 2,
   "ttl_ms": 30000
 }
 ```
@@ -86,17 +132,34 @@ Content-Type: application/json
 
 {
   "allowed": true,
-  "lease_id": "lease-uuid-123"
+  "lease_id": "lease-uuid-123",
+  "max_concurrent": 2,
+  "current_count": 1,
+  "tier": "basic"
 }
 ```
 
-**Acquire 响应（拒绝）：**
+**Acquire 响应（拒绝 - 超限）：**
 ```json
-HTTP/1.1 200 OK
+HTTP/1.1 429 Too Many Requests
 Content-Type: application/json
 
 {
-  "allowed": false
+  "allowed": false,
+  "reason": "limit_exceeded",
+  "max_concurrent": 2,
+  "current_count": 2
+}
+```
+
+**Acquire 响应（拒绝 - 配置未找到）：**
+```json
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+
+{
+  "allowed": false,
+  "reason": "config_not_found"
 }
 ```
 
@@ -106,10 +169,21 @@ POST /release
 Content-Type: application/json
 
 {
-  "api_key": "key_basic_001",
   "lease_id": "lease-uuid-123"
-}\n
-Release 响应会被忽略（best-effort）。
+}
+```
+
+**Release 响应：**
+```json
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{
+  "released": true
+}
+```
+
+Release 响应会被插件忽略（best-effort 释放）。
 
 ## 部署步骤
 
@@ -119,9 +193,23 @@ Release 响应会被忽略（best-effort）。
 2. 已构建 WASM 模块：`bash ./build.sh`
 3. WASM 模块已上传到可访问的 HTTP 服务器
 
-### 步骤 1：部署 Counter Service（可选）
+### 步骤 1：部署 Redis（分布式模式必需）
 
-如果使用分布式限流模式，需要先部署 Counter Service：
+如果使用分布式限流模式，需要先部署 Redis：
+
+```bash
+kubectl apply -f redis.yaml
+```
+
+确保 Redis 正常运行：
+```bash
+kubectl get pods -l app=redis
+kubectl logs -l app=redis
+```
+
+### 步骤 2：部署 Counter Service（分布式模式必需）
+
+部署 Counter Service：
 
 ```bash
 kubectl apply -f counter-service-deployment.yaml
@@ -131,9 +219,82 @@ kubectl apply -f counter-service-deployment.yaml
 ```bash
 kubectl get pods -l app=ratelimit-service
 kubectl logs -l app=ratelimit-service
+
+# 检查健康状态
+kubectl exec -it <counter-service-pod> -- curl http://localhost:8080/health
 ```
 
-### 步骤 2：更新 WASM 模块 SHA256
+### 步骤 3：导入限流配置到 Redis
+
+#### 方法 1：使用迁移脚本（推荐）
+
+如果已有 YAML 格式的 `rate_limits` 配置，可使用迁移脚本自动导入：
+
+```bash
+# 安装 yq（如果未安装）
+# macOS: brew install yq
+# Linux: wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq && chmod +x /usr/local/bin/yq
+
+# 执行迁移（使用默认配置文件）
+bash scripts/migrate-config-to-redis.sh
+
+# 或指定配置文件和 Counter Service URL
+bash scripts/migrate-config-to-redis.sh \
+  -f deploy/istio/rate-limiter-plugin-config.yaml \
+  -u http://counter-service:8080 \
+  -d "api.example.com"
+```
+
+#### 方法 2：手动导入配置
+
+使用 Counter Service 配置管理 API 手动导入：
+
+```bash
+# 基础用户配置
+curl -X PUT http://<counter-service-ip>:8080/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "domain": "api.example.com",
+    "api_key": "key_basic_001",
+    "max_concurrent": 2,
+    "enabled": true,
+    "tier": "basic"
+  }'
+
+# 高级用户配置
+curl -X PUT http://<counter-service-ip>:8080/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "domain": "api.example.com",
+    "api_key": "key_premium_001",
+    "max_concurrent": 5,
+    "enabled": true,
+    "tier": "premium"
+  }'
+
+# 通配符域名配置（作为 fallback）
+curl -X PUT http://<counter-service-ip>:8080/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "domain": "*.example.com",
+    "api_key": "key_basic_001",
+    "max_concurrent": 3,
+    "enabled": true,
+    "tier": "basic"
+  }'
+```
+
+#### 验证配置
+
+```bash
+# 列出所有配置
+curl http://<counter-service-ip>:8080/configs
+
+# 查询特定配置
+curl "http://<counter-service-ip>:8080/config?domain=api.example.com&api_key=key_basic_001"
+```
+
+### 步骤 4：更新 WASM 模块 SHA256
 
 计算 WASM 模块的 SHA256：
 ```bash
@@ -142,13 +303,13 @@ sha256sum dist/rate-limiter.wasm
 
 更新 `rate-limiter-envoyfilter.yaml` 中的 `sha256` 字段。
 
-### 步骤 3：部署 EnvoyFilter
+### 步骤 5：部署 EnvoyFilter
 
 ```bash
 kubectl apply -f rate-limiter-envoyfilter.yaml
 ```
 
-### 步骤 4：验证部署
+### 步骤 6：验证部署
 
 检查 Envoy 配置是否生效：
 ```bash
@@ -162,18 +323,102 @@ curl -H "Host: api.example.com" \
      http://<gateway-ip>/test
 ```
 
+## 动态配置管理
+
+分布式模式下，限流配置存储在 Redis 中，可通过 Counter Service API 实时修改，无需重启插件。
+
+### 修改配置
+
+```bash
+# 调整并发限制
+curl -X PUT http://<counter-service-ip>:8080/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "domain": "api.example.com",
+    "api_key": "key_basic_001",
+    "max_concurrent": 10,
+    "enabled": true,
+    "tier": "basic"
+  }'
+```
+
+配置变更立即生效，下一个请求将使用新的限制值。
+
+### 禁用/启用 API Key
+
+```bash
+# 禁用某个 API Key
+curl -X PUT http://<counter-service-ip>:8080/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "domain": "api.example.com",
+    "api_key": "key_basic_001",
+    "max_concurrent": 2,
+    "enabled": false
+  }'
+```
+
+禁用后，该 API Key 的所有请求将被拒绝（404 config_not_found）。
+
+### 删除配置
+
+```bash
+curl -X DELETE "http://<counter-service-ip>:8080/config?domain=api.example.com&api_key=key_basic_001"
+```
+
+### 批量导入配置
+
+可以编写脚本批量导入配置：
+
+```bash
+#!/bin/bash
+# import-configs.sh
+
+COUNTER_SERVICE="http://counter-service:8080"
+
+# 从 JSON 文件读取配置
+cat configs.json | jq -c '.[]' | while read config; do
+  curl -X PUT "$COUNTER_SERVICE/config" \
+    -H "Content-Type: application/json" \
+    -d "$config"
+  echo "Imported: $config"
+done
+```
+
+configs.json 示例：
+```json
+[
+  {
+    "domain": "api.example.com",
+    "api_key": "key001",
+    "max_concurrent": 5,
+    "enabled": true,
+    "tier": "premium"
+  },
+  {
+    "domain": "*.example.com",
+    "api_key": "key002",
+    "max_concurrent": 2,
+    "enabled": true,
+    "tier": "basic"
+  }
+]
+```
+
 ## 降级行为
 
-当 Counter Service 不可用时，插件会自动降级到本地限流模式：
+当 Counter Service 或 Redis 不可用时，插件会自动降级到本地限流模式：
 
 1. HTTP 调用失败或超时 → 使用本地 limiter
-2. Counter Service 返回非 200 状态 → 使用本地 limiter
+2. Counter Service 返回 503（Redis 不可用）→ 使用本地 limiter
 3. 响应解析失败 → 使用本地 limiter
 
 降级期间会记录警告日志，可通过 Envoy 日志查看：
 ```bash
 kubectl logs <gateway-pod> -n istio-system | grep -i "falling back to local limiter"
 ```
+
+**注意：** 降级到本地模式时，如果插件配置中没有 `rate_limits` 静态配置，将拒绝所有请求。建议保留少量静态配置作为降级 fallback。
 
 ## 配置调优
 
@@ -251,14 +496,63 @@ kubectl logs <gateway-pod> -n istio-system | grep -i "falling back to local limi
 
 建议监控以下指标：
 
+### Counter Service 指标
+
+如果部署了 Prometheus，可以通过 ServiceMonitor 采集 Counter Service 指标：
+
+```bash
+kubectl apply -f prometheus-servicemonitor.yaml
+```
+
+关键指标：
+- `rate_limit_acquire_total{result="allowed|limit_exceeded|config_not_found|disabled"}` - Acquire 请求结果统计
+- `rate_limit_config_lookups_total{result="hit|wildcard|miss"}` - 配置查找结果统计
+- `redis_command_duration_seconds` - Redis 命令执行延迟
+- `http_request_duration_seconds{path="/acquire"}` - Acquire 请求延迟
+- `http_request_duration_seconds{path="/release"}` - Release 请求延迟
+
+### Envoy 指标
+
+通过 Envoy 的统计信息获取插件相关指标：
+```bash
+kubectl exec <gateway-pod> -n istio-system -- \
+  curl -s http://localhost:15000/stats | grep rate_limiter
+```
+
+关键指标：
 - Counter Service 响应时间
 - Counter Service 错误率
 - 降级到本地限流的频率
 - 429 响应数量
 - 每个 API Key 的并发请求数
 
-可以通过 Envoy 的统计信息获取这些指标：
-```bash
-kubectl exec <gateway-pod> -n istio-system -- \
-  curl -s http://localhost:15000/stats | grep rate_limiter
-```
+### 告警建议
+
+建议配置以下告警规则：
+
+1. **Counter Service 不可用**
+   ```yaml
+   - alert: CounterServiceDown
+     expr: up{job="counter-service"} == 0
+     for: 1m
+     annotations:
+       summary: "Counter Service is down"
+   ```
+
+2. **Redis 连接失败率高**
+   ```yaml
+   - alert: RedisConnectionFailureHigh
+     expr: rate(redis_connection_errors_total[5m]) > 0.1
+     for: 2m
+     annotations:
+       summary: "Redis connection failure rate is high"
+   ```
+
+3. **限流拒绝率异常**
+   ```yaml
+   - alert: RateLimitRejectRateHigh
+     expr: rate(rate_limit_acquire_total{result="limit_exceeded"}[5m]) > 100
+     for: 5m
+     annotations:
+       summary: "Rate limit reject rate is unusually high"
+   ```

@@ -59,15 +59,11 @@ spec:
                 value: |
                   domains:
                     - llm-demo.local
-                  rate_limits:
-                    - api_key: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsInVpZCI6InNmZS1wbGF0Zm9ybSIsImlhdCI6MTUxNjIzOTAyMn0.ii5xh3ikEg7cFWC9EVxNOsZRKa6phJImOf3vI6LSZuI
-                      max_concurrent: 2
-                    - api_key: key_premium_001
-                      max_concurrent: 5
                   token_statistics:
                     enabled: true
                     inject_stream_usage: true
                     metric_key_limit: 5000
+
                   distributed_limit:
                     enabled: true
                     backend: counter_service
@@ -77,6 +73,7 @@ spec:
                       release_path: /release
                       timeout_ms: 5000
                       lease_ttl_ms: 30000
+
                   error_response:
                     status_code: 429
                     message: Rate limit exceeded

@@ -189,16 +189,15 @@ func (h *httpContext) OnHttpRequestHeaders(numHeaders int, endOfStream bool) typ
 		h.distributedAPIKey = apiKey
 
 		cs := h.root.counterService
-		limit := h.root.limits[apiKey]
 
 		body, _ := json.Marshal(struct {
+			Domain string `json:"domain"`
 			APIKey string `json:"api_key"`
-			Limit  int    `json:"limit"`
-			TTLMS  int    `json:"ttl_ms"`
+			TTLMS  int64  `json:"ttl_ms"`
 		}{
+			Domain: h.domain,
 			APIKey: apiKey,
-			Limit:  limit,
-			TTLMS:  cs.LeaseTTLMS,
+			TTLMS:  int64(cs.LeaseTTLMS),
 		})
 
 		timeout := uint32(cs.TimeoutMS)
@@ -575,8 +574,13 @@ func (h *httpContext) onAcquireResponse(numHeaders, bodySize, numTrailers int) {
 	}
 
 	var resp struct {
-		Allowed bool   `json:"allowed"`
-		LeaseID string `json:"lease_id,omitempty"`
+		Allowed       bool   `json:"allowed"`
+		LeaseID       string `json:"lease_id,omitempty"`
+		Reason        string `json:"reason,omitempty"`
+		Message       string `json:"message,omitempty"`
+		MaxConcurrent int    `json:"max_concurrent,omitempty"`
+		CurrentCount  int    `json:"current_count,omitempty"`
+		Tier          string `json:"tier,omitempty"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
 		proxywasm.LogErrorf("parse acquire response: %v", err)
@@ -585,6 +589,7 @@ func (h *httpContext) onAcquireResponse(numHeaders, bodySize, numTrailers int) {
 	}
 
 	if !resp.Allowed {
+		proxywasm.LogWarnf("counter service denied: reason=%s message=%s", resp.Reason, resp.Message)
 		h.reject()
 		return
 	}

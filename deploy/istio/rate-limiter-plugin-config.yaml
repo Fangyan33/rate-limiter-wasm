@@ -1,14 +1,39 @@
+# Rate Limiter Plugin Configuration
+#
+# 分布式限流模式（推荐）：
+# - 限流配置存储在 Redis 中，通过 Counter Service 配置管理 API 动态管理
+# - 支持按 domain + api_key 维度配置，支持通配符域名匹配
+# - 配置变更实时生效，无需重启插件
+#
+# 配置管理示例：
+#   curl -X PUT http://counter-service:8080/config \
+#     -H "Content-Type: application/json" \
+#     -d '{"domain":"api.example.com","api_key":"key001","max_concurrent":5,"enabled":true}'
+
 domains:
   - api.example.com
-rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 2
-  - api_key: key_premium_001
-    max_concurrent: 5
+  - "*.example.com"  # 支持通配符域名
+
+# rate_limits 配置项已废弃（分布式模式下）
+# 所有限流配置通过 Counter Service API 管理，存储在 Redis:
+#   - 配置键格式: rl:config:{domain}:{api_key}
+#   - 通配符匹配: 精确 > *.parent > *
+#   - 配置字段: max_concurrent, enabled, tier
+#
+# 如需使用本地限流模式，请设置 distributed_limit.enabled: false
+# 并取消注释以下 rate_limits 配置：
+#
+# rate_limits:
+#   - api_key: key_basic_001
+#     max_concurrent: 2
+#   - api_key: key_premium_001
+#     max_concurrent: 5
+
 token_statistics:
   enabled: true
   inject_stream_usage: true
   metric_key_limit: 5000
+
 distributed_limit:
   enabled: true
   backend: counter_service
@@ -18,6 +43,7 @@ distributed_limit:
     release_path: /release
     timeout_ms: 5000
     lease_ttl_ms: 30000
+
 error_response:
   status_code: 429
   message: Rate limit exceeded
