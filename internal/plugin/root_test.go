@@ -400,7 +400,7 @@ error_response:
 	}
 }
 
-func TestPluginFallsBackToLocalLimitWhenAsyncAcquireFails(t *testing.T) {
+func TestPluginResumesRequestWhenAsyncAcquireReturnsNon200(t *testing.T) {
 	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
   - api.example.com
 rate_limits:
@@ -420,57 +420,137 @@ error_response:
 `))
 	defer reset()
 
-	// First request: async acquire fails, falls back to local limiter
-	ctx1 := host.InitializeHttpContext()
-	action := host.CallOnRequestHeaders(ctx1, [][2]string{
+	firstID := host.InitializeHttpContext()
+	firstAction := host.CallOnRequestHeaders(firstID, [][2]string{
+		{":authority", "api.example.com"},
+		{"authorization", "Bearer key_basic_001"},
+	}, false)
+	if firstAction != types.ActionPause {
+		t.Fatalf("expected first request to pause, got %v", firstAction)
+	}
+
+	firstCallouts := host.GetCalloutAttributesFromContext(firstID)
+	if len(firstCallouts) != 1 {
+		t.Fatalf("expected one first-request callout, got %d", len(firstCallouts))
+	}
+
+	secondID := host.InitializeHttpContext()
+	secondAction := host.CallOnRequestHeaders(secondID, [][2]string{
+		{":authority", "api.example.com"},
+		{"authorization", "Bearer key_basic_001"},
+	}, false)
+	if secondAction != types.ActionPause {
+		t.Fatalf("expected second request to pause, got %v", secondAction)
+	}
+
+	secondCallouts := host.GetCalloutAttributesFromContext(secondID)
+	if len(secondCallouts) != 1 {
+		t.Fatalf("expected one second-request callout, got %d", len(secondCallouts))
+	}
+
+	host.CallOnHttpCallResponse(firstCallouts[0].CalloutID, [][2]string{{":status", "500"}}, nil, []byte(`{"error":"service unavailable"}`))
+
+	if got := host.GetCurrentHttpStreamAction(firstID); got != types.ActionContinue {
+		t.Fatalf("expected first request to resume after non-200 acquire response, got %v", got)
+	}
+	if resp := host.GetSentLocalResponse(firstID); resp != nil {
+		t.Fatalf("expected no local response after first non-200 acquire response, got %#v", resp)
+	}
+
+	host.CallOnHttpCallResponse(secondCallouts[0].CalloutID, [][2]string{{":status", "500"}}, nil, []byte(`{"error":"service unavailable"}`))
+
+	if got := host.GetCurrentHttpStreamAction(secondID); got != types.ActionContinue {
+		t.Fatalf("expected second request to also resume after non-200 acquire response, got %v", got)
+	}
+	if resp := host.GetSentLocalResponse(secondID); resp != nil {
+		t.Fatalf("expected no local response for second request after non-200 acquire response, got %#v", resp)
+	}
+}
+
+func TestPluginResumesRequestWhenAsyncAcquireResponseIsInvalidJSON(t *testing.T) {
+	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
+  - api.example.com
+rate_limits:
+  - api_key: key_basic_001
+    max_concurrent: 1
+distributed_limit:
+  enabled: true
+  backend: counter_service
+  counter_service:
+    cluster: ratelimit-service
+    acquire_path: /acquire
+    release_path: /release
+    lease_ttl_ms: 30000
+error_response:
+  status_code: 429
+  message: Rate limit exceeded
+`))
+	defer reset()
+
+	contextID := host.InitializeHttpContext()
+	action := host.CallOnRequestHeaders(contextID, [][2]string{
 		{":authority", "api.example.com"},
 		{"authorization", "Bearer key_basic_001"},
 	}, false)
 	if action != types.ActionPause {
-		t.Fatalf("expected first request to pause, got %v", action)
+		t.Fatalf("expected request to pause, got %v", action)
 	}
 
-	callouts := host.GetCalloutAttributesFromContext(ctx1)
+	callouts := host.GetCalloutAttributesFromContext(contextID)
 	if len(callouts) != 1 {
 		t.Fatalf("expected one callout, got %d", len(callouts))
 	}
 
-	// Simulate acquire failure with non-200 status
-	host.CallOnHttpCallResponse(callouts[0].CalloutID, [][2]string{{":status", "500"}}, nil, []byte(`{"error":"service unavailable"}`))
+	host.CallOnHttpCallResponse(callouts[0].CalloutID, [][2]string{{":status", "200"}}, nil, []byte(`not-json`))
 
-	// First request should resume after fallback acquire
-	if got := host.GetCurrentHttpStreamAction(ctx1); got != types.ActionContinue {
-		t.Fatalf("expected first request to resume after fallback, got %v", got)
+	if got := host.GetCurrentHttpStreamAction(contextID); got != types.ActionContinue {
+		t.Fatalf("expected request to resume after invalid acquire response body, got %v", got)
 	}
-	if resp := host.GetSentLocalResponse(ctx1); resp != nil {
-		t.Fatalf("expected no rejection for first request, got %#v", resp)
+	if resp := host.GetSentLocalResponse(contextID); resp != nil {
+		t.Fatalf("expected no local response after invalid acquire response body, got %#v", resp)
 	}
+}
 
-	// Second request: should be rejected by local fallback limit
-	ctx2 := host.InitializeHttpContext()
-	action2 := host.CallOnRequestHeaders(ctx2, [][2]string{
+func TestPluginDoesNotDispatchReleaseWhenAcquireFailedOpen(t *testing.T) {
+	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
+  - api.example.com
+rate_limits:
+  - api_key: key_basic_001
+    max_concurrent: 1
+distributed_limit:
+  enabled: true
+  backend: counter_service
+  counter_service:
+    cluster: ratelimit-service
+    acquire_path: /acquire
+    release_path: /release
+    lease_ttl_ms: 30000
+error_response:
+  status_code: 429
+  message: Rate limit exceeded
+`))
+	defer reset()
+
+	contextID := host.InitializeHttpContext()
+	action := host.CallOnRequestHeaders(contextID, [][2]string{
 		{":authority", "api.example.com"},
 		{"authorization", "Bearer key_basic_001"},
 	}, false)
-	if action2 != types.ActionPause {
-		t.Fatalf("expected second request to pause, got %v", action2)
+	if action != types.ActionPause {
+		t.Fatalf("expected request to pause, got %v", action)
 	}
 
-	callouts2 := host.GetCalloutAttributesFromContext(ctx2)
-	if len(callouts2) != 1 {
-		t.Fatalf("expected one callout for second request, got %d", len(callouts2))
+	callouts := host.GetCalloutAttributesFromContext(contextID)
+	if len(callouts) != 1 {
+		t.Fatalf("expected one callout, got %d", len(callouts))
 	}
 
-	// Simulate second acquire failure
-	host.CallOnHttpCallResponse(callouts2[0].CalloutID, [][2]string{{":status", "500"}}, nil, nil)
+	host.CallOnHttpCallResponse(callouts[0].CalloutID, [][2]string{{":status", "500"}}, nil, []byte(`{"error":"service unavailable"}`))
+	host.CompleteHttpContext(contextID)
 
-	// Second request should be rejected by local fallback
-	resp2 := host.GetSentLocalResponse(ctx2)
-	if resp2 == nil {
-		t.Fatal("expected second request to be rejected by local fallback")
-	}
-	if resp2.StatusCode != 429 {
-		t.Fatalf("unexpected status: got %d want 429", resp2.StatusCode)
+	finalCallouts := host.GetCalloutAttributesFromContext(contextID)
+	if len(finalCallouts) != 1 {
+		t.Fatalf("expected only acquire callout after fail-open, got %d", len(finalCallouts))
 	}
 }
 

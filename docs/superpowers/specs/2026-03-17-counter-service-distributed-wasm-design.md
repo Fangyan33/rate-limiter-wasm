@@ -26,7 +26,9 @@
 2. `bash ./build.sh` 可成功编译（不再引入 goroutine / net/http 标准库传输实现）
 3. Counter Service API 契约与请求体字段固定为 **选项 A**：
    - Acquire 请求体：`{ "domain": "...", "api_key": "...", "ttl_ms": ... }`
-4. 保持现有降级语义：Counter Service 或 Redis 不可用时，插件降级到本地 limiter（fallback）
+4. 插件错误处理语义固定为：
+   - `DispatchHttpCall` 返回 err：直接 reject
+   - 已成功 dispatch 后若超时 / 非 200 / 响应解析失败：直接 fail-open 透传请求，不做本次限流判断
 
 ## 非目标
 
@@ -51,9 +53,9 @@
    - 当启用 counter_service 分布式模式时：
      - Acquire：`DispatchHttpCall` → `POST /acquire` 并 `ActionPause`。
      - Release：`OnHttpStreamDone` best-effort `DispatchHttpCall` → `POST /release`。
-   - 错误处理与降级（与现有实现一致）：
+   - 错误处理与降级（按最新确认语义）：
      - **DispatchHttpCall 返回 err（无法 dispatch）**：直接 reject（不 fallback）。
-     - **已成功 dispatch 但超时/状态码非 200/响应解析失败**：`fallbackToLocalLimiter()`，并 `ResumeHttpRequest()`。
+     - **已成功 dispatch 但超时/状态码非 200/响应解析失败**：直接 `ResumeHttpRequest()` 继续透传请求，**不做任何限流判断**（fail-open）。
 
 2. **Counter Service（cmd/counter-service + internal/counter-service/**）
    - `/acquire`：读取 Redis 动态配置 + 并发计数（Lua 原子脚本），返回 `AcquireResult`。
@@ -85,9 +87,10 @@
 
 #### Acquire 回调（onAcquireResponse）
 
-关键语义已存在于 [internal/plugin/root.go:544-619](internal/plugin/root.go#L544-L619)：
+关键语义已存在于 [internal/plugin/root.go:544-619](internal/plugin/root.go#L544-L619)，但本次设计将错误处理更新为 **fail-open（仅限已成功 dispatch 后的失败）**：
 
-- status != 200：fallback → Resume
+- status != 200：**直接 Resume 透传请求**（不 fallback 到本地 limiter）
+- 响应体解析失败：**直接 Resume 透传请求**（不 fallback）
 - 解析响应体：
   - Allowed=false：拒绝（本地 send response）
   - Allowed=true：保存 lease_id → Resume
@@ -126,11 +129,11 @@ Acquire 响应（**状态码契约：总是 200 表达策略结果**）：
 |---|---:|---|---|
 | 策略允许 | 200 | `allowed=true`, `lease_id` MUST 非空 | 保存 `lease_id`，Resume |
 | 策略拒绝（超限/未配置/禁用/配置非法） | 200 | `allowed=false`, `reason` MUST 非空 | reject（不 fallback） |
-| 基础设施失败（Redis 不可用/内部错误） | 503/5xx | 可返回 `allowed=false` + `reason`（可选） | `status!=200` → fallback |
+| 基础设施失败（Redis 不可用/内部错误） | 503/5xx | 可返回 `allowed=false` + `reason`（可选） | `status!=200` → fail-open Resume |
 
-- `allowed=true`：`lease_id` **必须**非空且全局唯一；若无法生成 lease，应返回 5xx（触发插件 fallback），禁止 200 + allowed=true + 空 lease_id。
+- `allowed=true`：`lease_id` **必须**非空且全局唯一；若无法生成 lease，应返回 5xx（触发插件 fail-open），禁止 200 + allowed=true + 空 lease_id。
 
-> 说明：这是为了与插件当前实现对齐。插件的 `onAcquireResponse`（见 [internal/plugin/root.go:544-619](internal/plugin/root.go#L544-L619)）在 `status != 200` 时会直接 fallback，本规范确保“策略拒绝”不会被误判为故障并放行。
+> 说明：这是为了与插件最新语义对齐。插件的 `onAcquireResponse`（见 [internal/plugin/root.go:544-619](internal/plugin/root.go#L544-L619)）在已成功 dispatch 后若收到 `status != 200`，会直接 `ResumeHttpRequest()` 透传，而不是 fallback 到本地 limiter；因此“策略拒绝”必须继续使用 `HTTP 200 + allowed=false` 表达，避免被误判为基础设施故障并放行。
 
 #### /release
 
@@ -154,16 +157,17 @@ Release 响应（最小可测试契约）：
 
 ### 插件侧（WASM）
 
-为了避免“策略拒绝”被误判为故障并触发 fallback 放行，本规范采用 **/acquire 总是 200 表达策略结果** 的契约（详见上文 `### API 契约`）。插件侧处理规则应与现有实现保持一致：
+为了避免“策略拒绝”被误判为基础设施故障并错误放行，本规范采用 **/acquire 总是 200 表达策略结果** 的契约（详见上文 `### API 契约`）。同时，插件错误处理按用户最新确认语义更新为“**仅 dispatch 后失败时 fail-open**”：
 
-- **DispatchHttpCall 直接失败**（例如 cluster 配置错误、无法 dispatch）：当前实现是 **直接 reject**（不 fallback）。
-- **Counter Service 返回 `status != 200`**（视为基础设施失败）：**fallback 到 local limiter**。
-- **响应体 JSON 解析失败**：**fallback 到 local limiter**。
+- **DispatchHttpCall 直接失败**（例如 cluster 配置错误、无法 dispatch）：**直接 reject**（不 fallback，不放行）。
+- **Counter Service 返回 `status != 200`**（视为基础设施失败）：**直接 `ResumeHttpRequest()` 透传请求**，不做本次限流判断。
+- **响应体 JSON 解析失败**：**直接 `ResumeHttpRequest()` 透传请求**，不做本次限流判断。
 - **`status==200` 且 `allowed==false`**：**reject**（返回配置的 `error_response`）。
+- **`status==200` 且 `allowed==true`**：保存 `lease_id`，然后 `ResumeHttpRequest()`。
 
 ### Counter Service 侧
 
-- Redis 网络错误/不可用：返回 `HTTP 503`（或其它 5xx），让插件走 fallback。
+- Redis 网络错误/不可用：返回 `HTTP 503`（或其它 5xx），插件会按最新语义 **fail-open 透传请求**。
 - 策略拒绝（未配置/禁用/超限/配置非法）：返回 `HTTP 200` + `allowed=false` + `reason`。
 
 ## 验证标准（Definition of Done）
@@ -174,24 +178,25 @@ Release 响应（最小可测试契约）：
    - 插件能发出 `/acquire` callout
    - Counter Service 能从 Redis 命中配置并返回 `HTTP 200` + `allowed=true|false`
    - 请求结束触发 `/release` best-effort callout（仅当 acquire 成功返回 lease_id 时）
-4. Redis/Counter Service 不可用（返回 5xx 或超时）时，插件按既有语义 fallback 到本地 limiter（或按配置拒绝）
+4. Redis/Counter Service 不可用（返回 5xx 或超时）时，插件按最新语义直接 fail-open 透传请求；仅在 `DispatchHttpCall` 自身返回 err 时直接拒绝
 
 建议测试覆盖点（用于防回归）：
 
 插件侧（WASM）：
-- `status==200 && allowed==false` 必须走拒绝路径（不 fallback）。
-- `status!=200` 必须走 fallback 路径。
-- fallback 成功时必须 `ResumeHttpRequest()`；fallback acquire 失败时应拒绝。
+- `DispatchHttpCall` 返回 err 必须走拒绝路径（不 fallback，不放行）。
+- `status==200 && allowed==false` 必须走拒绝路径（不放行）。
+- `status!=200` 必须直接 `ResumeHttpRequest()` 放行（不 fallback）。
+- 响应体解析失败必须直接 `ResumeHttpRequest()` 放行（不 fallback）。
 - acquire 失败/拒绝的请求不应触发 release callout。
 
 Counter Service 侧（契约测试）：
-- 超限/未配置/禁用等“策略拒绝”必须返回 `HTTP 200` + `allowed=false`（禁止 4xx/429，否则插件会 fallback 放行）。
-- Redis 不可用必须返回 5xx（建议 503），用于触发插件 fallback。
+- 超限/未配置/禁用等“策略拒绝”必须返回 `HTTP 200` + `allowed=false`（禁止 4xx/429，否则插件会按 fail-open 语义放行）。
+- Redis 不可用必须返回 5xx（建议 503），用于触发插件 fail-open。
 - /release 对 lease_not_found 必须幂等（200 + released=false）。
 ## 实施影响面（预计修改）
 
 - 修改 [internal/store/client.go](internal/store/client.go) 与 [internal/store/client_test.go](internal/store/client_test.go)：移除真实 HTTP 实现，改为占位并调整测试断言。
-- 修改 Counter Service `/acquire` handler：将“策略拒绝（超限/未配置/禁用/配置非法）”从 4xx/429 调整为 **HTTP 200 + allowed=false**（与插件现有 `status!=200` fallback 行为对齐）。
+- 修改 Counter Service `/acquire` handler：将“策略拒绝（超限/未配置/禁用/配置非法）”从 4xx/429 调整为 **HTTP 200 + allowed=false**（与插件最新 `status!=200` → fail-open 行为对齐）。
 - 可能需要更新/补充插件侧测试，验证 async callout 分支在编译与逻辑上保持正确。
 
 ---

@@ -39,42 +39,32 @@ func (h *AcquireHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.redisClient.Acquire(r.Context(), req)
 	if err != nil {
-		status := http.StatusInternalServerError
-		reason := "internal error"
+		status := http.StatusOK
+		reason := "internal_error"
 
 		switch {
 		case errors.Is(err, redis.ErrRedisUnavailable):
 			status = http.StatusServiceUnavailable
-			reason = "redis unavailable"
+			reason = "redis_unavailable"
 		case errors.Is(err, redis.ErrConfigNotFound):
-			status = http.StatusNotFound
 			reason = "config_not_found"
 		case errors.Is(err, redis.ErrAPIKeyDisabled):
-			status = http.StatusForbidden
 			reason = "api_key_disabled"
 		case errors.Is(err, redis.ErrLimitExceeded):
-			status = 429 // Too Many Requests
 			reason = "limit_exceeded"
 		case errors.Is(err, redis.ErrInvalidConfig):
-			status = http.StatusBadRequest
 			reason = "invalid_config"
 		}
 
 		h.writeJSON(w, status, map[string]interface{}{
-			"allowed":   false,
-			"reason":     reason,
-			"message":    err.Error(),
+			"allowed": false,
+			"reason":  reason,
+			"message": err.Error(),
 		})
 		return
 	}
 
-	// 成功响应
-	status := http.StatusOK
-	if !result.Allowed {
-		status = 429
-	}
-
-	h.writeJSON(w, status, result)
+	h.writeJSON(w, http.StatusOK, result)
 }
 
 // writeError 统一错误响应

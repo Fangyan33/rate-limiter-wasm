@@ -98,8 +98,8 @@ func TestAcquireHandler_LimitReached(t *testing.T) {
 
 	handler.ServeHTTP(w, req)
 
-	if w.Code != 429 {
-		t.Errorf("expected status 429, got %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", w.Code)
 	}
 
 	var resp map[string]interface{}
@@ -109,8 +109,114 @@ func TestAcquireHandler_LimitReached(t *testing.T) {
 		t.Error("expected allowed=false when limit reached")
 	}
 
+	if reason, ok := resp["reason"].(string); !ok || reason != "limit_exceeded" {
+		t.Errorf("expected reason=limit_exceeded, got %#v", resp["reason"])
+	}
+
 	if leaseID, ok := resp["lease_id"].(string); ok && leaseID != "" {
 		t.Error("expected empty lease_id when denied")
+	}
+}
+
+func TestAcquireHandler_ConfigMiss(t *testing.T) {
+	handler, _, _ := setupTestHandler(t)
+
+	reqBody := map[string]interface{}{
+		"domain": "api.example.com",
+		"api_key": "missing-config-key",
+		"ttl_ms":  30000,
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/acquire", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if allowed, ok := resp["allowed"].(bool); !ok || allowed {
+		t.Errorf("expected allowed=false for config miss, got %#v", resp["allowed"])
+	}
+	if reason, ok := resp["reason"].(string); !ok || reason != "config_not_found" {
+		t.Errorf("expected reason=config_not_found, got %#v", resp["reason"])
+	}
+}
+
+func TestAcquireHandler_DisabledConfig(t *testing.T) {
+	handler, _, mr := setupTestHandler(t)
+
+	mr.HSet("rl:config:api.example.com:disabled-key", "max_concurrent", "5")
+	mr.HSet("rl:config:api.example.com:disabled-key", "enabled", "false")
+
+	reqBody := map[string]interface{}{
+		"domain": "api.example.com",
+		"api_key": "disabled-key",
+		"ttl_ms":  30000,
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/acquire", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if allowed, ok := resp["allowed"].(bool); !ok || allowed {
+		t.Errorf("expected allowed=false for disabled config, got %#v", resp["allowed"])
+	}
+	if reason, ok := resp["reason"].(string); !ok || reason != "api_key_disabled" {
+		t.Errorf("expected reason=api_key_disabled, got %#v", resp["reason"])
+	}
+}
+
+func TestAcquireHandler_InvalidConfig(t *testing.T) {
+	handler, _, mr := setupTestHandler(t)
+
+	mr.HSet("rl:config:api.example.com:invalid-config-key", "max_concurrent", "0")
+	mr.HSet("rl:config:api.example.com:invalid-config-key", "enabled", "true")
+
+	reqBody := map[string]interface{}{
+		"domain": "api.example.com",
+		"api_key": "invalid-config-key",
+		"ttl_ms":  30000,
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/acquire", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if allowed, ok := resp["allowed"].(bool); !ok || allowed {
+		t.Errorf("expected allowed=false for invalid config, got %#v", resp["allowed"])
+	}
+	if reason, ok := resp["reason"].(string); !ok || reason != "invalid_config" {
+		t.Errorf("expected reason=invalid_config, got %#v", resp["reason"])
 	}
 }
 
