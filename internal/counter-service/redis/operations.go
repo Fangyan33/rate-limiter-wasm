@@ -2,96 +2,130 @@ package redis
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+
+	"rate-limiter-wasm/internal/counter-service/models"
 )
 
-// AcquireRequest represents a request to acquire a concurrency slot
-type AcquireRequest struct {
-	APIKey string
-	Limit  int64
-	TTLMS  int64
-}
-
-// AcquireResult represents the result of an acquire operation
+// AcquireResult 与 models.AcquireResult 保持一致
 type AcquireResult struct {
-	Allowed bool
-	LeaseID string
+	Allowed       bool   `json:"allowed"`
+	LeaseID       string `json:"lease_id,omitempty"`
+	Reason        string `json:"reason,omitempty"`
+	Message       string `json:"message,omitempty"`
+	MaxConcurrent int    `json:"max_concurrent,omitempty"`
+	CurrentCount  int    `json:"current_count,omitempty"`
+	Tier          string `json:"tier,omitempty"`
 }
 
-// ReleaseRequest represents a request to release a concurrency slot
-type ReleaseRequest struct {
-	APIKey  string
-	LeaseID string
-}
-
-// ReleaseResult represents the result of a release operation
 type ReleaseResult struct {
-	Released bool
+	Released     bool   `json:"released"`
+	Reason       string `json:"reason,omitempty"`
+	Message      string `json:"message,omitempty"`
+	CurrentCount int    `json:"current_count,omitempty"`
 }
 
-// Acquire attempts to acquire a concurrency slot for the given API key
-func (c *Client) Acquire(ctx context.Context, req AcquireRequest) (*AcquireResult, error) {
-	// Generate unique lease ID
+var (
+	ErrConfigNotFound  = errors.New("config not found")
+	ErrAPIKeyDisabled   = errors.New("api key disabled")
+	ErrLimitExceeded    = errors.New("limit exceeded")
+	ErrInvalidConfig    = errors.New("invalid config")
+	ErrLeaseNotFound    = errors.New("lease not found")
+	ErrRedisUnavailable = errors.New("redis unavailable")
+)
+
+// Acquire 执行原子获取并发槽位（调用 Lua acquire_with_config）
+func (c *Client) Acquire(ctx context.Context, req models.AcquireRequest) (*AcquireResult, error) {
 	leaseID := uuid.New().String()
 
-	// Build Redis keys
-	leasesKey := buildLeasesKey(req.APIKey)
-	leaseKey := buildLeaseKey(req.APIKey, leaseID)
+	configKey := c.Key(fmt.Sprintf("config:%s:%s", req.Domain, req.APIKey))
+	leasesKey := c.Key(fmt.Sprintf("leases:%s:%s", req.Domain, req.APIKey))
+	leaseKey := c.Key(fmt.Sprintf("lease:%s", leaseID))
 
-	// Get current timestamp in milliseconds
-	nowMs := time.Now().UnixMilli()
+	wildcardConfigKey := ""
+	if parts := strings.SplitN(req.Domain, ".", 2); len(parts) == 2 {
+		wildcardConfigKey = c.Key(fmt.Sprintf("config:*.%s:%s", parts[1], req.APIKey))
+	}
+	globalConfigKey := c.Key(fmt.Sprintf("config:*:%s", req.APIKey))
 
-	// Execute Lua script
-	result, err := c.rdb.Eval(ctx, acquireScript, []string{leasesKey, leaseKey}, req.Limit, req.TTLMS, nowMs, leaseID).Result()
+	keys := []string{configKey, leasesKey, leaseKey}
+	if wildcardConfigKey != "" {
+		keys = append(keys, wildcardConfigKey)
+	} else {
+		keys = append(keys, "")
+	}
+	keys = append(keys, globalConfigKey)
+
+	nowMS := time.Now().UnixMilli()
+	args := []interface{}{req.TTLMS, nowMS, leaseID}
+
+	result, err := c.rdb.Eval(ctx, GetAcquireScript(), keys, args...).Result()
 	if err != nil {
-		return nil, wrapError(err)
+		if isNetworkError(err) {
+			return nil, ErrRedisUnavailable
+		}
+		return nil, fmt.Errorf("eval acquire script: %w", err)
 	}
 
-	// Parse result
-	resultSlice, ok := result.([]interface{})
-	if !ok || len(resultSlice) != 2 {
-		return nil, fmt.Errorf("unexpected script result format: %v", result)
-	}
-
-	allowed, ok := resultSlice[0].(int64)
+	jsonStr, ok := result.(string)
 	if !ok {
-		return nil, fmt.Errorf("unexpected allowed value type: %T", resultSlice[0])
+		return nil, fmt.Errorf("script returned non-string: %T", result)
 	}
 
-	if allowed == 0 {
-		return &AcquireResult{Allowed: false}, nil
+	var res AcquireResult
+	if err := json.Unmarshal([]byte(jsonStr), &res); err != nil {
+		return nil, fmt.Errorf("unmarshal acquire result: %w", err)
 	}
 
-	// Script returns the full lease key, but we only need the lease_id
-	// Since we generated the lease_id ourselves, just return it
-	return &AcquireResult{
-		Allowed: true,
-		LeaseID: leaseID,
-	}, nil
+	if !res.Allowed {
+		switch res.Reason {
+		case "config_not_found":
+			return &res, ErrConfigNotFound
+		case "api_key_disabled":
+			return &res, ErrAPIKeyDisabled
+		case "limit_exceeded":
+			return &res, ErrLimitExceeded
+		case "invalid_config":
+			return &res, ErrInvalidConfig
+		default:
+			return &res, fmt.Errorf("unknown reason: %s", res.Reason)
+		}
+	}
+
+	return &res, nil
 }
 
-// Release releases a previously acquired concurrency slot
-func (c *Client) Release(ctx context.Context, req ReleaseRequest) (*ReleaseResult, error) {
-	// Build Redis keys
-	leasesKey := buildLeasesKey(req.APIKey)
-	leaseKey := buildLeaseKey(req.APIKey, req.LeaseID)
+// Release 执行释放并发槽位（调用 Lua release_with_lease）
+func (c *Client) Release(ctx context.Context, leaseID string) (*ReleaseResult, error) {
+	leaseKey := c.Key(fmt.Sprintf("lease:%s", leaseID))
 
-	// Execute Lua script
-	result, err := c.rdb.Eval(ctx, releaseScript, []string{leasesKey, leaseKey}, req.LeaseID).Result()
+	result, err := c.rdb.Eval(ctx, GetReleaseScript(), []string{leaseKey}, leaseID).Result()
 	if err != nil {
-		return nil, wrapError(err)
+		if isNetworkError(err) {
+			return nil, ErrRedisUnavailable
+		}
+		return nil, fmt.Errorf("eval release script: %w", err)
 	}
 
-	// Parse result
-	released, ok := result.(int64)
+	jsonStr, ok := result.(string)
 	if !ok {
-		return nil, fmt.Errorf("unexpected script result type: %T", result)
+		return nil, fmt.Errorf("script returned non-string: %T", result)
 	}
 
-	return &ReleaseResult{
-		Released: released == 1,
-	}, nil
+	var res ReleaseResult
+	if err := json.Unmarshal([]byte(jsonStr), &res); err != nil {
+		return nil, fmt.Errorf("unmarshal release result: %w", err)
+	}
+
+	if !res.Released {
+		return &res, ErrLeaseNotFound
+	}
+
+	return &res, nil
 }

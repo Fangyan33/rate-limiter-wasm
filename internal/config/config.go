@@ -141,8 +141,8 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	if len(c.RateLimits) == 0 {
-		return fmt.Errorf("rate_limits must not be empty")
+	if !c.DistributedLimit.Enabled && len(c.RateLimits) == 0 {
+		return fmt.Errorf("rate_limits must not be empty when distributed_limit is disabled")
 	}
 
 	seen := make(map[string]struct{}, len(c.RateLimits))

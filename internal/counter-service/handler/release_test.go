@@ -9,17 +9,20 @@ import (
 )
 
 func TestReleaseHandler_Success(t *testing.T) {
-	handler, _ := setupTestHandler(t)
+	acquireHandler, releaseHandler, mr := setupTestHandler(t)
+
+	mr.HSet("rl:config:api.example.com:test-key", "max_concurrent", "5")
+	mr.HSet("rl:config:api.example.com:test-key", "enabled", "true")
 
 	acquireBody, _ := json.Marshal(map[string]interface{}{
+		"domain":  "api.example.com",
 		"api_key": "test-key",
-		"limit":   5,
 		"ttl_ms":  30000,
 	})
 	acquireReq := httptest.NewRequest(http.MethodPost, "/acquire", bytes.NewReader(acquireBody))
 	acquireReq.Header.Set("Content-Type", "application/json")
 	acquireResp := httptest.NewRecorder()
-	handler.Acquire(acquireResp, acquireReq)
+	acquireHandler.ServeHTTP(acquireResp, acquireReq)
 
 	var acquireResult map[string]interface{}
 	if err := json.NewDecoder(acquireResp.Body).Decode(&acquireResult); err != nil {
@@ -27,14 +30,13 @@ func TestReleaseHandler_Success(t *testing.T) {
 	}
 
 	releaseBody, _ := json.Marshal(map[string]interface{}{
-		"api_key":  "test-key",
 		"lease_id": acquireResult["lease_id"],
 	})
 	releaseReq := httptest.NewRequest(http.MethodPost, "/release", bytes.NewReader(releaseBody))
 	releaseReq.Header.Set("Content-Type", "application/json")
 	releaseResp := httptest.NewRecorder()
 
-	handler.Release(releaseResp, releaseReq)
+	releaseHandler.ServeHTTP(releaseResp, releaseReq)
 
 	if releaseResp.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d", releaseResp.Code)
@@ -51,17 +53,16 @@ func TestReleaseHandler_Success(t *testing.T) {
 }
 
 func TestReleaseHandler_LeaseNotFound(t *testing.T) {
-	handler, _ := setupTestHandler(t)
+	_, releaseHandler, _ := setupTestHandler(t)
 
 	body, _ := json.Marshal(map[string]interface{}{
-		"api_key":  "test-key",
 		"lease_id": "non-existent",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/release", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
-	handler.Release(w, req)
+	releaseHandler.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d", w.Code)
@@ -71,20 +72,22 @@ func TestReleaseHandler_LeaseNotFound(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-
 	if released, ok := resp["released"].(bool); !ok || released {
 		t.Error("expected released=false")
+	}
+	if reason, ok := resp["reason"].(string); !ok || reason != "lease_not_found" {
+		t.Errorf("expected reason=lease_not_found, got %#v", resp["reason"])
 	}
 }
 
 func TestReleaseHandler_InvalidJSON(t *testing.T) {
-	handler, _ := setupTestHandler(t)
+	_, releaseHandler, _ := setupTestHandler(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/release", bytes.NewReader([]byte("invalid json")))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
-	handler.Release(w, req)
+	releaseHandler.ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected status 400, got %d", w.Code)
@@ -92,23 +95,15 @@ func TestReleaseHandler_InvalidJSON(t *testing.T) {
 }
 
 func TestReleaseHandler_ValidationError(t *testing.T) {
-	handler, _ := setupTestHandler(t)
+	_, releaseHandler, _ := setupTestHandler(t)
 
 	tests := []struct {
 		name string
 		body map[string]interface{}
 	}{
 		{
-			name: "empty api_key",
-			body: map[string]interface{}{
-				"api_key":  "",
-				"lease_id": "lease-1",
-			},
-		},
-		{
 			name: "empty lease_id",
 			body: map[string]interface{}{
-				"api_key":  "test-key",
 				"lease_id": "",
 			},
 		},
@@ -121,7 +116,7 @@ func TestReleaseHandler_ValidationError(t *testing.T) {
 			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
 
-			handler.Release(w, req)
+			releaseHandler.ServeHTTP(w, req)
 
 			if w.Code != http.StatusBadRequest {
 				t.Errorf("expected status 400, got %d", w.Code)
@@ -131,18 +126,17 @@ func TestReleaseHandler_ValidationError(t *testing.T) {
 }
 
 func TestReleaseHandler_RedisNetworkError(t *testing.T) {
-	handler, mr := setupTestHandler(t)
+	_, releaseHandler, mr := setupTestHandler(t)
 	mr.Close()
 
 	body, _ := json.Marshal(map[string]interface{}{
-		"api_key":  "test-key",
 		"lease_id": "lease-1",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/release", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
-	handler.Release(w, req)
+	releaseHandler.ServeHTTP(w, req)
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected status 503, got %d", w.Code)

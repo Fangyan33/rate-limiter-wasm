@@ -189,16 +189,15 @@ func (h *httpContext) OnHttpRequestHeaders(numHeaders int, endOfStream bool) typ
 		h.distributedAPIKey = apiKey
 
 		cs := h.root.counterService
-		limit := h.root.limits[apiKey]
 
 		body, _ := json.Marshal(struct {
+			Domain string `json:"domain"`
 			APIKey string `json:"api_key"`
-			Limit  int    `json:"limit"`
-			TTLMS  int    `json:"ttl_ms"`
+			TTLMS  int64  `json:"ttl_ms"`
 		}{
+			Domain: h.domain,
 			APIKey: apiKey,
-			Limit:  limit,
-			TTLMS:  cs.LeaseTTLMS,
+			TTLMS:  int64(cs.LeaseTTLMS),
 		})
 
 		timeout := uint32(cs.TimeoutMS)
@@ -549,7 +548,7 @@ func (h *httpContext) onAcquireResponse(numHeaders, bodySize, numTrailers int) {
 	headers, err := proxywasm.GetHttpCallResponseHeaders()
 	if err != nil {
 		proxywasm.LogErrorf("read acquire response headers: %v", err)
-		h.fallbackToLocalLimiter()
+		h.resumeAfterFailedOpen()
 		return
 	}
 
@@ -562,29 +561,35 @@ func (h *httpContext) onAcquireResponse(numHeaders, bodySize, numTrailers int) {
 	}
 
 	if status != "200" {
-		proxywasm.LogWarnf("counter service returned status %s, falling back to local limiter", status)
-		h.fallbackToLocalLimiter()
+		proxywasm.LogWarnf("counter service returned status %s, failing open", status)
+		h.resumeAfterFailedOpen()
 		return
 	}
 
 	body, err := proxywasm.GetHttpCallResponseBody(0, math.MaxInt32)
 	if err != nil {
 		proxywasm.LogErrorf("read acquire response body: %v", err)
-		h.fallbackToLocalLimiter()
+		h.resumeAfterFailedOpen()
 		return
 	}
 
 	var resp struct {
-		Allowed bool   `json:"allowed"`
-		LeaseID string `json:"lease_id,omitempty"`
+		Allowed       bool   `json:"allowed"`
+		LeaseID       string `json:"lease_id,omitempty"`
+		Reason        string `json:"reason,omitempty"`
+		Message       string `json:"message,omitempty"`
+		MaxConcurrent int    `json:"max_concurrent,omitempty"`
+		CurrentCount  int    `json:"current_count,omitempty"`
+		Tier          string `json:"tier,omitempty"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
 		proxywasm.LogErrorf("parse acquire response: %v", err)
-		h.fallbackToLocalLimiter()
+		h.resumeAfterFailedOpen()
 		return
 	}
 
 	if !resp.Allowed {
+		proxywasm.LogWarnf("counter service denied: reason=%s message=%s", resp.Reason, resp.Message)
 		h.reject()
 		return
 	}
@@ -595,21 +600,9 @@ func (h *httpContext) onAcquireResponse(numHeaders, bodySize, numTrailers int) {
 	}
 }
 
-func (h *httpContext) fallbackToLocalLimiter() {
-	if h.root == nil || h.root.limiter == nil {
-		h.reject()
-		return
-	}
-
-	release, ok := h.root.limiter.Acquire(h.distributedAPIKey)
-	if !ok {
-		h.reject()
-		return
-	}
-
-	h.release = release
+func (h *httpContext) resumeAfterFailedOpen() {
 	if err := proxywasm.ResumeHttpRequest(); err != nil {
-		proxywasm.LogErrorf("resume http request after fallback: %v", err)
+		proxywasm.LogErrorf("resume http request after failed-open acquire: %v", err)
 	}
 }
 

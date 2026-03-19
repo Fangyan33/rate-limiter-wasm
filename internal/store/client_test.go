@@ -1,9 +1,11 @@
 package store
 
 import (
+	"errors"
 	"testing"
 
 	"rate-limiter-wasm/internal/config"
+	"rate-limiter-wasm/internal/limiter"
 )
 
 func TestNewClientRejectsEmptyCluster(t *testing.T) {
@@ -80,7 +82,7 @@ func TestNewClientRejectsReleasePathWithoutLeadingSlash(t *testing.T) {
 	}
 }
 
-func TestNewClientBuildsAsyncCounterServiceClient(t *testing.T) {
+func TestNewClientReturnsPlaceholderStoreThatReportsUnavailable(t *testing.T) {
 	store, err := NewClient(config.CounterServiceConfig{
 		Cluster:     "ratelimit-service",
 		TimeoutMS:   100,
@@ -92,23 +94,14 @@ func TestNewClientBuildsAsyncCounterServiceClient(t *testing.T) {
 		t.Fatalf("NewClient() error = %v", err)
 	}
 
-	c, ok := store.(*client)
-	if !ok {
-		t.Fatalf("expected *client, got %T", store)
+	release, allowed, err := store.Acquire("key_basic_001", 1)
+	if !errors.Is(err, limiter.ErrStoreUnavailable) {
+		t.Fatalf("expected ErrStoreUnavailable, got %v", err)
 	}
-	if c.http.cluster != "ratelimit-service" {
-		t.Fatalf("unexpected cluster: %q", c.http.cluster)
+	if allowed {
+		t.Fatal("expected placeholder store acquire to deny distributed acquire")
 	}
-	if c.http.acquirePath != "/acquire" {
-		t.Fatalf("unexpected acquire path: %q", c.http.acquirePath)
-	}
-	if c.http.releasePath != "/release" {
-		t.Fatalf("unexpected release path: %q", c.http.releasePath)
-	}
-	if c.http.timeoutMS != 100 {
-		t.Fatalf("unexpected timeout: %d", c.http.timeoutMS)
-	}
-	if c.http.leaseTTLMS != 30000 {
-		t.Fatalf("unexpected lease ttl: %d", c.http.leaseTTLMS)
+	if release != nil {
+		t.Fatal("expected nil release func from placeholder store")
 	}
 }

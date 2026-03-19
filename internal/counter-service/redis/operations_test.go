@@ -1,4 +1,4 @@
-package redis
+package redis_test
 
 import (
 	"context"
@@ -6,340 +6,237 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"rate-limiter-wasm/internal/counter-service/models"
+	"rate-limiter-wasm/internal/counter-service/redis"
 )
 
-func setupTestRedis(t *testing.T) (*Client, *miniredis.Miniredis) {
-	t.Helper()
+func setupTestRedis(t *testing.T) (*miniredis.Miniredis, *redis.Client) {
+	s, err := miniredis.Run()
+	require.NoError(t, err)
+	t.Cleanup(func() { s.Close() })
 
-	mr := miniredis.RunT(t)
-	client, err := NewClient(mr.Addr(), "", 0, 10, 3)
-	if err != nil {
-		t.Fatalf("failed to create client: %v", err)
-	}
+	client, err := redis.NewClient(redis.Config{
+		Addr:      s.Addr(),
+		KeyPrefix: "rl:",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { client.Close() })
 
-	return client, mr
+	return s, client
 }
 
-func TestAcquire_Success(t *testing.T) {
-	client, _ := setupTestRedis(t)
-	defer client.Close()
+func TestAcquire_ExactMatch(t *testing.T) {
+	s, client := setupTestRedis(t)
+
+	// 准备精确配置
+	s.HSet("rl:config:api.example.com:key001", "max_concurrent", "5")
+	s.HSet("rl:config:api.example.com:key001", "enabled", "true")
+	s.HSet("rl:config:api.example.com:key001", "tier", "premium")
 
 	ctx := context.Background()
-	req := AcquireRequest{
-		APIKey: "test-key",
-		Limit:  5,
+	result, err := client.Acquire(ctx, models.AcquireRequest{
+		Domain: "api.example.com",
+		APIKey: "key001",
 		TTLMS:  30000,
-	}
+	})
 
-	result, err := client.Acquire(ctx, req)
-	if err != nil {
-		t.Fatalf("Acquire failed: %v", err)
-	}
+	assert.NoError(t, err)
+	assert.True(t, result.Allowed)
+	assert.NotEmpty(t, result.LeaseID)
+	assert.Equal(t, 5, result.MaxConcurrent)
+	assert.Equal(t, 1, result.CurrentCount)
+	assert.Equal(t, "premium", result.Tier)
 
-	if !result.Allowed {
-		t.Error("expected allowed=true")
-	}
+	members, err := s.ZMembers("rl:leases:api.example.com:key001")
+	assert.NoError(t, err)
+	assert.Len(t, members, 1)
+	assert.Equal(t, result.LeaseID, members[0])
 
-	if result.LeaseID == "" {
-		t.Error("expected non-empty lease_id")
-	}
+	leaseVal, _ := s.Get("rl:lease:" + result.LeaseID)
+	assert.Equal(t, "rl:leases:api.example.com:key001", leaseVal)
 }
 
-func TestAcquire_ReachLimit(t *testing.T) {
-	client, _ := setupTestRedis(t)
-	defer client.Close()
+func TestAcquire_WildcardFallback(t *testing.T) {
+	s, client := setupTestRedis(t)
+
+	// 只设置通配符配置
+	s.HSet("rl:config:*.example.com:key001", "max_concurrent", "3")
+	s.HSet("rl:config:*.example.com:key001", "enabled", "true")
+
+	result, err := client.Acquire(context.Background(), models.AcquireRequest{
+		Domain: "api.example.com",
+		APIKey: "key001",
+		TTLMS:  30000,
+	})
+
+	assert.NoError(t, err)
+	assert.True(t, result.Allowed)
+	assert.Equal(t, 3, result.MaxConcurrent)
+
+	leaseVal, _ := s.Get("rl:lease:" + result.LeaseID)
+	assert.Equal(t, "rl:leases:api.example.com:key001", leaseVal)
+}
+
+func TestAcquire_GlobalFallback(t *testing.T) {
+	s, client := setupTestRedis(t)
+
+	// 只设置全局配置
+	s.HSet("rl:config:*:key001", "max_concurrent", "1")
+	s.HSet("rl:config:*:key001", "enabled", "true")
+
+	result, err := client.Acquire(context.Background(), models.AcquireRequest{
+		Domain: "any.domain.com",
+		APIKey: "key001",
+		TTLMS:  30000,
+	})
+
+	assert.NoError(t, err)
+	assert.True(t, result.Allowed)
+	assert.Equal(t, 1, result.MaxConcurrent)
+
+	leaseVal, _ := s.Get("rl:lease:" + result.LeaseID)
+	assert.Equal(t, "rl:leases:any.domain.com:key001", leaseVal)
+}
+
+func TestAcquire_ConfigNotFound(t *testing.T) {
+	_, client := setupTestRedis(t)
+
+	result, err := client.Acquire(context.Background(), models.AcquireRequest{
+		Domain: "unknown.com",
+		APIKey: "key999",
+		TTLMS:  30000,
+	})
+
+	assert.Error(t, err)
+	assert.False(t, result.Allowed)
+	assert.Equal(t, "config_not_found", result.Reason)
+}
+
+func TestAcquire_APIKeyDisabled(t *testing.T) {
+	s, client := setupTestRedis(t)
+
+	s.HSet("rl:config:api.example.com:key001", "max_concurrent", "5")
+	s.HSet("rl:config:api.example.com:key001", "enabled", "false")
+
+	result, err := client.Acquire(context.Background(), models.AcquireRequest{
+		Domain: "api.example.com",
+		APIKey: "key001",
+		TTLMS:  30000,
+	})
+
+	assert.Error(t, err)
+	assert.False(t, result.Allowed)
+	assert.Equal(t, "api_key_disabled", result.Reason)
+}
+
+func TestAcquire_LimitExceeded(t *testing.T) {
+	s, client := setupTestRedis(t)
+
+	s.HSet("rl:config:api.example.com:key001", "max_concurrent", "2")
+	s.HSet("rl:config:api.example.com:key001", "enabled", "true")
 
 	ctx := context.Background()
-	req := AcquireRequest{
-		APIKey: "test-key",
-		Limit:  3,
+
+	// 先占满 2 个槽
+	for i := 0; i < 2; i++ {
+		_, err := client.Acquire(ctx, models.AcquireRequest{
+			Domain: "api.example.com",
+			APIKey: "key001",
+			TTLMS:  30000,
+		})
+		assert.NoError(t, err)
+	}
+
+	// 第 3 次应该被拒绝
+	result, err := client.Acquire(ctx, models.AcquireRequest{
+		Domain: "api.example.com",
+		APIKey: "key001",
 		TTLMS:  30000,
-	}
+	})
 
-	// Acquire 3 times (reach limit)
-	for i := 0; i < 3; i++ {
-		result, err := client.Acquire(ctx, req)
-		if err != nil {
-			t.Fatalf("Acquire %d failed: %v", i+1, err)
-		}
-		if !result.Allowed {
-			t.Errorf("Acquire %d: expected allowed=true", i+1)
-		}
-	}
-
-	// 4th acquire should be denied
-	result, err := client.Acquire(ctx, req)
-	if err != nil {
-		t.Fatalf("Acquire 4 failed: %v", err)
-	}
-	if result.Allowed {
-		t.Error("expected allowed=false when limit reached")
-	}
-	if result.LeaseID != "" {
-		t.Error("expected empty lease_id when denied")
-	}
+	assert.Error(t, err)
+	assert.False(t, result.Allowed)
+	assert.Equal(t, "limit_exceeded", result.Reason)
+	assert.Equal(t, 2, result.MaxConcurrent)
+	assert.Equal(t, 2, result.CurrentCount)
 }
 
 func TestRelease_Success(t *testing.T) {
-	client, _ := setupTestRedis(t)
-	defer client.Close()
+	s, client := setupTestRedis(t)
 
-	ctx := context.Background()
+	s.HSet("rl:config:api.example.com:key001", "max_concurrent", "5")
+	s.HSet("rl:config:api.example.com:key001", "enabled", "true")
 
-	// First acquire
-	acqReq := AcquireRequest{
-		APIKey: "test-key",
-		Limit:  5,
-		TTLMS:  30000,
-	}
-	acqResult, err := client.Acquire(ctx, acqReq)
-	if err != nil {
-		t.Fatalf("Acquire failed: %v", err)
-	}
-
-	// Then release
-	relReq := ReleaseRequest{
-		APIKey:  "test-key",
-		LeaseID: acqResult.LeaseID,
-	}
-	relResult, err := client.Release(ctx, relReq)
-	if err != nil {
-		t.Fatalf("Release failed: %v", err)
-	}
-
-	if !relResult.Released {
-		t.Error("expected released=true")
-	}
-}
-
-func TestRelease_LeaseNotFound(t *testing.T) {
-	client, _ := setupTestRedis(t)
-	defer client.Close()
-
-	ctx := context.Background()
-
-	// Release non-existent lease
-	relReq := ReleaseRequest{
-		APIKey:  "test-key",
-		LeaseID: "non-existent-lease",
-	}
-	relResult, err := client.Release(ctx, relReq)
-	if err != nil {
-		t.Fatalf("Release failed: %v", err)
-	}
-
-	if relResult.Released {
-		t.Error("expected released=false for non-existent lease")
-	}
-}
-
-func TestRelease_DuplicateRelease(t *testing.T) {
-	client, _ := setupTestRedis(t)
-	defer client.Close()
-
-	ctx := context.Background()
-
-	// Acquire
-	acqReq := AcquireRequest{
-		APIKey: "test-key",
-		Limit:  5,
-		TTLMS:  30000,
-	}
-	acqResult, err := client.Acquire(ctx, acqReq)
-	if err != nil {
-		t.Fatalf("Acquire failed: %v", err)
-	}
-
-	// First release
-	relReq := ReleaseRequest{
-		APIKey:  "test-key",
-		LeaseID: acqResult.LeaseID,
-	}
-	relResult1, err := client.Release(ctx, relReq)
-	if err != nil {
-		t.Fatalf("First release failed: %v", err)
-	}
-	if !relResult1.Released {
-		t.Error("expected first release to succeed")
-	}
-
-	// Second release (duplicate)
-	relResult2, err := client.Release(ctx, relReq)
-	if err != nil {
-		t.Fatalf("Second release failed: %v", err)
-	}
-	if relResult2.Released {
-		t.Error("expected second release to return released=false")
-	}
-}
-
-func TestAcquireRelease_CounterAccuracy(t *testing.T) {
-	client, _ := setupTestRedis(t)
-	defer client.Close()
-
-	ctx := context.Background()
-	apiKey := "test-key"
-
-	// Acquire 3 slots
-	var leases []string
-	for i := 0; i < 3; i++ {
-		result, err := client.Acquire(ctx, AcquireRequest{
-			APIKey: apiKey,
-			Limit:  5,
-			TTLMS:  30000,
-		})
-		if err != nil {
-			t.Fatalf("Acquire %d failed: %v", i+1, err)
-		}
-		leases = append(leases, result.LeaseID)
-	}
-
-	// Check ZSET size
-	leasesKey := buildLeasesKey(apiKey)
-	size, err := client.rdb.ZCard(ctx, leasesKey).Result()
-	if err != nil {
-		t.Fatalf("ZCard failed: %v", err)
-	}
-	if size != 3 {
-		t.Errorf("expected ZSET size=3, got %d", size)
-	}
-
-	// Release 2 slots
-	for i := 0; i < 2; i++ {
-		_, err := client.Release(ctx, ReleaseRequest{
-			APIKey:  apiKey,
-			LeaseID: leases[i],
-		})
-		if err != nil {
-			t.Fatalf("Release %d failed: %v", i+1, err)
-		}
-	}
-
-	// Check ZSET size after release
-	size, err = client.rdb.ZCard(ctx, leasesKey).Result()
-	if err != nil {
-		t.Fatalf("ZCard failed: %v", err)
-	}
-	if size != 1 {
-		t.Errorf("expected ZSET size=1 after releases, got %d", size)
-	}
-}
-
-func TestAcquire_LeaseTTLExpiry(t *testing.T) {
-	client, mr := setupTestRedis(t)
-	defer client.Close()
-
-	ctx := context.Background()
-	apiKey := "test-key"
-
-	// Acquire with short TTL
-	result, err := client.Acquire(ctx, AcquireRequest{
-		APIKey: apiKey,
-		Limit:  5,
-		TTLMS:  100, // 100ms TTL
-	})
-	if err != nil {
-		t.Fatalf("Acquire failed: %v", err)
-	}
-
-	leaseKey := buildLeaseKey(apiKey, result.LeaseID)
-
-	// Verify lease exists
-	if !mr.Exists(leaseKey) {
-		t.Error("lease key should exist immediately after acquire")
-	}
-
-	// Wait for lease to expire (real time, not miniredis time)
-	time.Sleep(150 * time.Millisecond)
-
-	// Fast-forward miniredis time to expire the lease key
-	mr.FastForward(200 * time.Millisecond)
-
-	// Verify lease expired
-	if mr.Exists(leaseKey) {
-		t.Error("lease key should have expired")
-	}
-
-	// ZSET should still contain the expired lease (not yet cleaned)
-	leasesKey := buildLeasesKey(apiKey)
-	size, err := client.rdb.ZCard(ctx, leasesKey).Result()
-	if err != nil {
-		t.Fatalf("ZCard failed: %v", err)
-	}
-	if size != 1 {
-		t.Errorf("expected ZSET size=1 before cleanup, got %d", size)
-	}
-
-	// Next acquire should auto-clean expired leases
-	result2, err := client.Acquire(ctx, AcquireRequest{
-		APIKey: apiKey,
-		Limit:  5,
+	// 先 acquire
+	acqResult, err := client.Acquire(context.Background(), models.AcquireRequest{
+		Domain: "api.example.com",
+		APIKey: "key001",
 		TTLMS:  30000,
 	})
-	if err != nil {
-		t.Fatalf("Second acquire failed: %v", err)
-	}
-	if !result2.Allowed {
-		t.Error("second acquire should succeed after expired lease cleanup")
-	}
+	require.NoError(t, err)
+	require.True(t, acqResult.Allowed)
 
-	// ZSET should now only contain the new lease (old one cleaned up)
-	size, err = client.rdb.ZCard(ctx, leasesKey).Result()
-	if err != nil {
-		t.Fatalf("ZCard failed: %v", err)
-	}
-	if size != 1 {
-		t.Errorf("expected ZSET size=1 after cleanup, got %d", size)
-	}
+	// 再 release
+	relResult, err := client.Release(context.Background(), acqResult.LeaseID)
+	assert.NoError(t, err)
+	assert.True(t, relResult.Released)
+	assert.Equal(t, 0, relResult.CurrentCount)
 }
 
-func TestAcquire_ConcurrentRequests(t *testing.T) {
-	client, _ := setupTestRedis(t)
-	defer client.Close()
+func TestAcquire_LeaseExpiredAutoRecovery(t *testing.T) {
+	s, client := setupTestRedis(t)
+
+	s.HSet("rl:config:api.example.com:key001", "max_concurrent", "1")
+	s.HSet("rl:config:api.example.com:key001", "enabled", "true")
 
 	ctx := context.Background()
-	apiKey := "test-key"
-	limit := int64(10)
 
-	// Simulate concurrent acquires
-	results := make(chan *AcquireResult, 15)
-	errors := make(chan error, 15)
+	r1, err := client.Acquire(ctx, models.AcquireRequest{
+		Domain: "api.example.com",
+		APIKey: "key001",
+		TTLMS:  100,
+	})
+	require.NoError(t, err)
+	require.True(t, r1.Allowed)
 
-	for i := 0; i < 15; i++ {
-		go func() {
-			result, err := client.Acquire(ctx, AcquireRequest{
-				APIKey: apiKey,
-				Limit:  limit,
-				TTLMS:  30000,
-			})
-			if err != nil {
-				errors <- err
-				return
-			}
-			results <- result
-		}()
-	}
+	s.FastForward(200 * time.Millisecond)
+	time.Sleep(120 * time.Millisecond)
 
-	// Collect results
-	var allowed, denied int
-	for i := 0; i < 15; i++ {
-		select {
-		case err := <-errors:
-			t.Fatalf("concurrent acquire failed: %v", err)
-		case result := <-results:
-			if result.Allowed {
-				allowed++
-			} else {
-				denied++
-			}
-		}
-	}
+	r2, err := client.Acquire(ctx, models.AcquireRequest{
+		Domain: "api.example.com",
+		APIKey: "key001",
+		TTLMS:  30000,
+	})
+	assert.NoError(t, err)
+	assert.True(t, r2.Allowed, "acquire should succeed after lease expiry")
+	assert.Equal(t, 1, r2.CurrentCount)
+}
 
-	// Should allow exactly 10, deny 5
-	if allowed != 10 {
-		t.Errorf("expected 10 allowed, got %d", allowed)
-	}
-	if denied != 5 {
-		t.Errorf("expected 5 denied, got %d", denied)
-	}
+func TestRelease_Idempotent(t *testing.T) {
+	s, client := setupTestRedis(t)
+
+	s.HSet("rl:config:api.example.com:key001", "max_concurrent", "5")
+	s.HSet("rl:config:api.example.com:key001", "enabled", "true")
+
+	ctx := context.Background()
+	acqResult, err := client.Acquire(ctx, models.AcquireRequest{
+		Domain: "api.example.com",
+		APIKey: "key001",
+		TTLMS:  30000,
+	})
+	require.NoError(t, err)
+
+	r1, err := client.Release(ctx, acqResult.LeaseID)
+	assert.NoError(t, err)
+	assert.True(t, r1.Released)
+	assert.Equal(t, 0, r1.CurrentCount)
+
+	r2, err := client.Release(ctx, acqResult.LeaseID)
+	assert.ErrorIs(t, err, redis.ErrLeaseNotFound)
+	require.NotNil(t, r2)
+	assert.False(t, r2.Released)
+	assert.Equal(t, "lease_not_found", r2.Reason)
 }

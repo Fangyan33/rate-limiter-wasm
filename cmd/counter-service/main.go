@@ -16,9 +16,15 @@ import (
 func main() {
 	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
 	redisPassword := getEnv("REDIS_PASSWORD", "")
+	keyPrefix := getEnv("REDIS_KEY_PREFIX", "rl:")
 	port := getEnv("PORT", "8080")
 
-	client, err := redis.NewClient(redisAddr, redisPassword, 0, 10, 3)
+	client, err := redis.NewClient(redis.Config{
+		Addr:      redisAddr,
+		Password:  redisPassword,
+		DB:        0,
+		KeyPrefix: keyPrefix,
+	})
 	if err != nil {
 		log.Fatalf("failed to create redis client: %v", err)
 	}
@@ -29,12 +35,19 @@ func main() {
 	}
 	log.Printf("connected to redis at %s", redisAddr)
 
-	h := handler.NewHandler(client)
+	acquireHandler := handler.NewAcquireHandler(client)
+	releaseHandler := handler.NewReleaseHandler(client)
+	configHandler := handler.NewConfigHandler(client)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/acquire", h.Acquire)
-	mux.HandleFunc("/release", h.Release)
-	mux.HandleFunc("/health", h.Health)
+	mux.Handle("/acquire", acquireHandler)
+	mux.Handle("/release", releaseHandler)
+	mux.Handle("/config", configHandler)
+	mux.Handle("/configs", configHandler)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
 
 	srv := &http.Server{
 		Addr:         ":" + port,

@@ -4,123 +4,81 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"time"
 
 	"rate-limiter-wasm/internal/counter-service/models"
-	redisclient "rate-limiter-wasm/internal/counter-service/redis"
+	"rate-limiter-wasm/internal/counter-service/redis"
 )
 
-// Handler handles counter-service HTTP requests.
-type Handler struct {
-	redis *redisclient.Client
+// AcquireHandler 处理 POST /acquire 请求
+type AcquireHandler struct {
+	redisClient *redis.Client
 }
 
-// NewHandler creates a new Handler.
-func NewHandler(client *redisclient.Client) *Handler {
-	return &Handler{redis: client}
+// NewAcquireHandler 创建 handler 实例
+func NewAcquireHandler(client *redis.Client) *AcquireHandler {
+	return &AcquireHandler{redisClient: client}
 }
 
-// Acquire handles POST /acquire.
-func (h *Handler) Acquire(w http.ResponseWriter, r *http.Request) {
-	startedAt := time.Now()
-	lrw := newLoggingResponseWriter(w)
-	var meta accessLogMeta
-	defer func() {
-		logAccess(r, lrw, startedAt, meta)
-	}()
+// ServeHTTP 实现 http.Handler 接口
+func (h *AcquireHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		h.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
 
 	var req models.AcquireRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(lrw, http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		h.writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	meta.apiKey = req.APIKey
 
 	if err := req.Validate(); err != nil {
-		writeJSON(lrw, http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		h.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	result, err := h.redis.Acquire(r.Context(), redisclient.AcquireRequest{
-		APIKey: req.APIKey,
-		Limit:  req.Limit,
-		TTLMS:  req.TTLMS,
-	})
+	result, err := h.redisClient.Acquire(r.Context(), req)
 	if err != nil {
-		status := http.StatusInternalServerError
-		if errors.Is(err, redisclient.ErrNetworkTimeout) {
+		status := http.StatusOK
+		reason := "internal_error"
+
+		switch {
+		case errors.Is(err, redis.ErrRedisUnavailable):
 			status = http.StatusServiceUnavailable
+			reason = "redis_unavailable"
+		case errors.Is(err, redis.ErrConfigNotFound):
+			reason = "config_not_found"
+		case errors.Is(err, redis.ErrAPIKeyDisabled):
+			reason = "api_key_disabled"
+		case errors.Is(err, redis.ErrLimitExceeded):
+			reason = "limit_exceeded"
+		case errors.Is(err, redis.ErrInvalidConfig):
+			reason = "invalid_config"
 		}
-		writeJSON(lrw, status, models.ErrorResponse{Error: err.Error()})
+
+		h.writeJSON(w, status, map[string]interface{}{
+			"allowed": false,
+			"reason":  reason,
+			"message": err.Error(),
+		})
 		return
 	}
 
-	meta.leaseID = result.LeaseID
-	meta.allowed = &result.Allowed
-	writeJSON(lrw, http.StatusOK, models.AcquireResponse{
-		Allowed: result.Allowed,
-		LeaseID: result.LeaseID,
-	})
+	h.writeJSON(w, http.StatusOK, result)
 }
 
-// Release handles POST /release.
-func (h *Handler) Release(w http.ResponseWriter, r *http.Request) {
-	startedAt := time.Now()
-	lrw := newLoggingResponseWriter(w)
-	var meta accessLogMeta
-	defer func() {
-		logAccess(r, lrw, startedAt, meta)
-	}()
-
-	var req models.ReleaseRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(lrw, http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
-		return
-	}
-	meta.apiKey = req.APIKey
-	meta.leaseID = req.LeaseID
-
-	if err := req.Validate(); err != nil {
-		writeJSON(lrw, http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
-		return
-	}
-
-	result, err := h.redis.Release(r.Context(), redisclient.ReleaseRequest{
-		APIKey:  req.APIKey,
-		LeaseID: req.LeaseID,
-	})
-	if err != nil {
-		status := http.StatusInternalServerError
-		if errors.Is(err, redisclient.ErrNetworkTimeout) {
-			status = http.StatusServiceUnavailable
-		}
-		writeJSON(lrw, status, models.ErrorResponse{Error: err.Error()})
-		return
-	}
-
-	meta.released = &result.Released
-	writeJSON(lrw, http.StatusOK, models.ReleaseResponse{
-		Released: result.Released,
-	})
+// writeError 统一错误响应
+type errorResp struct {
+	Error string `json:"error"`
 }
 
-// Health handles GET /health.
-func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
-	startedAt := time.Now()
-	lrw := newLoggingResponseWriter(w)
-	defer func() {
-		logAccess(r, lrw, startedAt, accessLogMeta{})
-	}()
-
-	if err := h.redis.Ping(r.Context()); err != nil {
-		writeJSON(lrw, http.StatusServiceUnavailable, map[string]string{"status": "unavailable"})
-		return
-	}
-	writeJSON(lrw, http.StatusOK, map[string]string{"status": "ok"})
+func (h *AcquireHandler) writeError(w http.ResponseWriter, code int, msg string) {
+	h.writeJSON(w, code, errorResp{Error: msg})
 }
 
-func writeJSON(w http.ResponseWriter, status int, v any) {
+// writeJSON 统一 JSON 响应
+func (h *AcquireHandler) writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
+	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }
