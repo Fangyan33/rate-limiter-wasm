@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"rate-limiter-wasm/internal/counter-service/redis"
@@ -280,6 +281,111 @@ func TestAcquireHandler_ValidationError(t *testing.T) {
 				t.Errorf("expected status 400, got %d", w.Code)
 			}
 		})
+	}
+}
+
+func TestAcquireHandler_LeaseExpiredAutoRecovery(t *testing.T) {
+	handler, _, mr := setupTestHandler(t)
+
+	mr.HSet("rl:config:api.example.com:test-key", "max_concurrent", "1")
+	mr.HSet("rl:config:api.example.com:test-key", "enabled", "true")
+
+	reqBody := map[string]interface{}{
+		"domain":  "api.example.com",
+		"api_key": "test-key",
+		"ttl_ms":  100,
+	}
+
+	body1, _ := json.Marshal(reqBody)
+	req1 := httptest.NewRequest(http.MethodPost, "/acquire", bytes.NewReader(body1))
+	req1.Header.Set("Content-Type", "application/json")
+	w1 := httptest.NewRecorder()
+	handler.ServeHTTP(w1, req1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("expected first acquire status 200, got %d", w1.Code)
+	}
+
+	mr.FastForward(200 * time.Millisecond)
+	time.Sleep(120 * time.Millisecond)
+
+	body2, _ := json.Marshal(reqBody)
+	req2 := httptest.NewRequest(http.MethodPost, "/acquire", bytes.NewReader(body2))
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, req2)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected second acquire status 200, got %d", w2.Code)
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w2.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if allowed, ok := resp["allowed"].(bool); !ok || !allowed {
+		t.Fatalf("expected allowed=true after lease expiry, got %#v", resp["allowed"])
+	}
+}
+
+func TestAcquireHandler_WildcardFallback(t *testing.T) {
+	handler, _, mr := setupTestHandler(t)
+
+	mr.HSet("rl:config:*.example.com:test-key", "max_concurrent", "3")
+	mr.HSet("rl:config:*.example.com:test-key", "enabled", "true")
+
+	reqBody := map[string]interface{}{
+		"domain":  "api.example.com",
+		"api_key": "test-key",
+		"ttl_ms":  30000,
+	}
+	body, _ := json.Marshal(reqBody)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/acquire", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if allowed, ok := resp["allowed"].(bool); !ok || !allowed {
+		t.Fatalf("expected allowed=true, got %#v", resp["allowed"])
+	}
+}
+
+func TestAcquireHandler_GlobalFallback(t *testing.T) {
+	handler, _, mr := setupTestHandler(t)
+
+	mr.HSet("rl:config:*:test-key", "max_concurrent", "4")
+	mr.HSet("rl:config:*:test-key", "enabled", "true")
+
+	reqBody := map[string]interface{}{
+		"domain":  "any.domain.com",
+		"api_key": "test-key",
+		"ttl_ms":  30000,
+	}
+	body, _ := json.Marshal(reqBody)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/acquire", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if allowed, ok := resp["allowed"].(bool); !ok || !allowed {
+		t.Fatalf("expected allowed=true, got %#v", resp["allowed"])
 	}
 }
 

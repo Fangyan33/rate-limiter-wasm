@@ -3,6 +3,7 @@ package redis_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/assert"
@@ -49,11 +50,13 @@ func TestAcquire_ExactMatch(t *testing.T) {
 	assert.Equal(t, 1, result.CurrentCount)
 	assert.Equal(t, "premium", result.Tier)
 
-	// 检查计数器和租约
-	count, _ := s.Get("rl:counter:api.example.com:key001")
-	assert.Equal(t, "1", count)
+	members, err := s.ZMembers("rl:leases:api.example.com:key001")
+	assert.NoError(t, err)
+	assert.Len(t, members, 1)
+	assert.Equal(t, result.LeaseID, members[0])
+
 	leaseVal, _ := s.Get("rl:lease:" + result.LeaseID)
-	assert.Equal(t, "rl:counter:api.example.com:key001", leaseVal)
+	assert.Equal(t, "rl:leases:api.example.com:key001", leaseVal)
 }
 
 func TestAcquire_WildcardFallback(t *testing.T) {
@@ -72,6 +75,9 @@ func TestAcquire_WildcardFallback(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, result.Allowed)
 	assert.Equal(t, 3, result.MaxConcurrent)
+
+	leaseVal, _ := s.Get("rl:lease:" + result.LeaseID)
+	assert.Equal(t, "rl:leases:api.example.com:key001", leaseVal)
 }
 
 func TestAcquire_GlobalFallback(t *testing.T) {
@@ -90,6 +96,9 @@ func TestAcquire_GlobalFallback(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, result.Allowed)
 	assert.Equal(t, 1, result.MaxConcurrent)
+
+	leaseVal, _ := s.Get("rl:lease:" + result.LeaseID)
+	assert.Equal(t, "rl:leases:any.domain.com:key001", leaseVal)
 }
 
 func TestAcquire_ConfigNotFound(t *testing.T) {
@@ -177,13 +186,57 @@ func TestRelease_Success(t *testing.T) {
 	assert.Equal(t, 0, relResult.CurrentCount)
 }
 
-func TestRelease_LeaseNotFound(t *testing.T) {
-	_, client := setupTestRedis(t)
+func TestAcquire_LeaseExpiredAutoRecovery(t *testing.T) {
+	s, client := setupTestRedis(t)
 
-	result, err := client.Release(context.Background(), "non-existent-lease-id")
-	assert.Error(t, err)
-	assert.False(t, result.Released)
-	assert.Equal(t, "lease_not_found", result.Reason)
+	s.HSet("rl:config:api.example.com:key001", "max_concurrent", "1")
+	s.HSet("rl:config:api.example.com:key001", "enabled", "true")
+
+	ctx := context.Background()
+
+	r1, err := client.Acquire(ctx, models.AcquireRequest{
+		Domain: "api.example.com",
+		APIKey: "key001",
+		TTLMS:  100,
+	})
+	require.NoError(t, err)
+	require.True(t, r1.Allowed)
+
+	s.FastForward(200 * time.Millisecond)
+	time.Sleep(120 * time.Millisecond)
+
+	r2, err := client.Acquire(ctx, models.AcquireRequest{
+		Domain: "api.example.com",
+		APIKey: "key001",
+		TTLMS:  30000,
+	})
+	assert.NoError(t, err)
+	assert.True(t, r2.Allowed, "acquire should succeed after lease expiry")
+	assert.Equal(t, 1, r2.CurrentCount)
 }
 
-// 可继续添加：Redis 不可用场景、并发安全、负计数防护等测试
+func TestRelease_Idempotent(t *testing.T) {
+	s, client := setupTestRedis(t)
+
+	s.HSet("rl:config:api.example.com:key001", "max_concurrent", "5")
+	s.HSet("rl:config:api.example.com:key001", "enabled", "true")
+
+	ctx := context.Background()
+	acqResult, err := client.Acquire(ctx, models.AcquireRequest{
+		Domain: "api.example.com",
+		APIKey: "key001",
+		TTLMS:  30000,
+	})
+	require.NoError(t, err)
+
+	r1, err := client.Release(ctx, acqResult.LeaseID)
+	assert.NoError(t, err)
+	assert.True(t, r1.Released)
+	assert.Equal(t, 0, r1.CurrentCount)
+
+	r2, err := client.Release(ctx, acqResult.LeaseID)
+	assert.ErrorIs(t, err, redis.ErrLeaseNotFound)
+	require.NotNil(t, r2)
+	assert.False(t, r2.Released)
+	assert.Equal(t, "lease_not_found", r2.Reason)
+}

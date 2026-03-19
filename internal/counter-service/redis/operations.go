@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -43,29 +44,27 @@ var (
 func (c *Client) Acquire(ctx context.Context, req models.AcquireRequest) (*AcquireResult, error) {
 	leaseID := uuid.New().String()
 
-	// 构造 Redis key（不含前缀，由 client.Key() 或直接拼接）
-	configKey      := c.Key(fmt.Sprintf("config:%s:%s", req.Domain, req.APIKey))
-	counterKey     := c.Key(fmt.Sprintf("counter:%s:%s", req.Domain, req.APIKey))
-	leaseKey       := c.Key(fmt.Sprintf("lease:%s", leaseID))
+	configKey := c.Key(fmt.Sprintf("config:%s:%s", req.Domain, req.APIKey))
+	leasesKey := c.Key(fmt.Sprintf("leases:%s:%s", req.Domain, req.APIKey))
+	leaseKey := c.Key(fmt.Sprintf("lease:%s", leaseID))
 
-	// 通配符 fallback
 	wildcardConfigKey := ""
 	if parts := strings.SplitN(req.Domain, ".", 2); len(parts) == 2 {
 		wildcardConfigKey = c.Key(fmt.Sprintf("config:*.%s:%s", parts[1], req.APIKey))
 	}
 	globalConfigKey := c.Key(fmt.Sprintf("config:*:%s", req.APIKey))
 
-	keys := []string{configKey, counterKey, leaseKey}
+	keys := []string{configKey, leasesKey, leaseKey}
 	if wildcardConfigKey != "" {
 		keys = append(keys, wildcardConfigKey)
 	} else {
-		keys = append(keys, "") // 占位，避免脚本索引越界
+		keys = append(keys, "")
 	}
 	keys = append(keys, globalConfigKey)
 
-	args := []interface{}{req.TTLMS, leaseID}
+	nowMS := time.Now().UnixMilli()
+	args := []interface{}{req.TTLMS, nowMS, leaseID}
 
-	// 执行 Lua（建议生产环境先 SCRIPT LOAD 缓存 SHA，这里简化用 EVAL）
 	result, err := c.rdb.Eval(ctx, GetAcquireScript(), keys, args...).Result()
 	if err != nil {
 		if isNetworkError(err) {
@@ -86,10 +85,14 @@ func (c *Client) Acquire(ctx context.Context, req models.AcquireRequest) (*Acqui
 
 	if !res.Allowed {
 		switch res.Reason {
-		case "config_not_found":   return &res, ErrConfigNotFound
-		case "api_key_disabled":   return &res, ErrAPIKeyDisabled
-		case "limit_exceeded":     return &res, ErrLimitExceeded
-		case "invalid_config":     return &res, ErrInvalidConfig
+		case "config_not_found":
+			return &res, ErrConfigNotFound
+		case "api_key_disabled":
+			return &res, ErrAPIKeyDisabled
+		case "limit_exceeded":
+			return &res, ErrLimitExceeded
+		case "invalid_config":
+			return &res, ErrInvalidConfig
 		default:
 			return &res, fmt.Errorf("unknown reason: %s", res.Reason)
 		}
@@ -102,7 +105,7 @@ func (c *Client) Acquire(ctx context.Context, req models.AcquireRequest) (*Acqui
 func (c *Client) Release(ctx context.Context, leaseID string) (*ReleaseResult, error) {
 	leaseKey := c.Key(fmt.Sprintf("lease:%s", leaseID))
 
-	result, err := c.rdb.Eval(ctx, GetReleaseScript(), []string{leaseKey}).Result()
+	result, err := c.rdb.Eval(ctx, GetReleaseScript(), []string{leaseKey}, leaseID).Result()
 	if err != nil {
 		if isNetworkError(err) {
 			return nil, ErrRedisUnavailable

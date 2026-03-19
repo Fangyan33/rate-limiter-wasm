@@ -53,7 +53,7 @@ spec:
                       uri: http://nginx-file-server-svc.default.svc.cluster.local/rate-limiter.wasm
                       cluster: outbound|80||nginx-file-server-svc.default.svc.cluster.local
                       timeout: 10s
-                    sha256: b4eb0355bb280fca25bd4f7bc5f4cf2590b78eeb3bc0294ea12db28b61071f01
+                    sha256: 3acc23dd9b97f74a0b6c127c7b5dee2d058b922a908c13e05c2ba1a798cb26ba
               configuration:
                 "@type": type.googleapis.com/google.protobuf.StringValue
                 value: |
@@ -63,7 +63,6 @@ spec:
                     enabled: true
                     inject_stream_usage: true
                     metric_key_limit: 5000
-
                   distributed_limit:
                     enabled: true
                     backend: counter_service
@@ -73,7 +72,6 @@ spec:
                       release_path: /release
                       timeout_ms: 5000
                       lease_ttl_ms: 30000
-
                   error_response:
                     status_code: 429
                     message: Rate limit exceeded

@@ -72,9 +72,11 @@ func TestReleaseHandler_LeaseNotFound(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-
 	if released, ok := resp["released"].(bool); !ok || released {
 		t.Error("expected released=false")
+	}
+	if reason, ok := resp["reason"].(string); !ok || reason != "lease_not_found" {
+		t.Errorf("expected reason=lease_not_found, got %#v", resp["reason"])
 	}
 }
 

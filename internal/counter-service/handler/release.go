@@ -48,6 +48,7 @@ func (h *ReleaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			reason = "redis unavailable"
 		} else if errors.Is(err, redis.ErrLeaseNotFound) {
 			status = http.StatusOK // 租约不存在也返回 200，但 released=false
+			reason = "lease_not_found"
 		}
 
 		h.writeJSON(w, status, map[string]interface{}{
