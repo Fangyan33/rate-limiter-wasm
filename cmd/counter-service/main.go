@@ -49,6 +49,18 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 
+	mux.HandleFunc("/wasm/rate-limiter.wasm", func(w http.ResponseWriter, r *http.Request) {
+		// 设置文件路径
+		filePath := "./rate-limiter.wasm"
+
+		// 设置响应头，提示浏览器下载
+		w.Header().Set("Content-Disposition", "attachment; filename=rate-limiter.wasm")
+		w.Header().Set("Content-Type", "application/octet-stream")
+
+		// 使用 ServeFile 发送文件
+		http.ServeFile(w, r, filePath)
+	})
+
 	srv := &http.Server{
 		Addr:         ":" + port,
 		Handler:      mux,
