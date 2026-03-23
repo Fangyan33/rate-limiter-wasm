@@ -75,3 +75,16 @@ spec:
                   error_response:
                     status_code: 429
                     message: Rate limit exceeded
+    - applyTo: BOOTSTRAP
+      match:
+        context: GATEWAY
+      patch:
+        operation: MERGE
+        value:
+          stats_config:
+            use_all_default_tags: true
+            stats_tags:
+              - tag_name: uid
+                regex: '(\\.__user0id__\.(.+))$'
+              - tag_name: domain
+                regex: '(\\.__host0domain__\.(.+))$'
