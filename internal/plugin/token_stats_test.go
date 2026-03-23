@@ -105,6 +105,100 @@ error_response:
 	}
 }
 
+func TestTokenStats_MetricNamePreservesSpecialChars(t *testing.T) {
+	jwt := mustJWTWithUID("sfe-platform")
+
+	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
+  - llm-svc.example.com
+rate_limits:
+  - api_key: "`+jwt+`"
+    max_concurrent: 1
+
+token_statistics:
+  enabled: true
+  metric_key_limit: 5000
+error_response:
+  status_code: 429
+  message: Rate limit exceeded
+`))
+	defer reset()
+
+	contextID := host.InitializeHttpContext()
+	action := host.CallOnRequestHeaders(contextID, [][2]string{
+		{":authority", "llm-svc.example.com"},
+		{"authorization", "Bearer " + jwt},
+	}, false)
+	if action != types.ActionContinue {
+		t.Fatalf("expected request to continue, got %v", action)
+	}
+
+	host.CallOnResponseBody(contextID, []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":20}}`), true)
+	host.CompleteHttpContext(contextID)
+
+	prompt, err := host.GetCounterMetric("llm.prompt_tokens_total.__host0domain__.llm-svc.example.com.__user0id__.sfe-platform")
+	if err != nil {
+		t.Fatalf("GetCounterMetric(prompt): %v", err)
+	}
+	if prompt != 10 {
+		t.Fatalf("unexpected prompt tokens: got %d want %d", prompt, 10)
+	}
+
+	completion, err := host.GetCounterMetric("llm.completion_tokens_total.__host0domain__.llm-svc.example.com.__user0id__.sfe-platform")
+	if err != nil {
+		t.Fatalf("GetCounterMetric(completion): %v", err)
+	}
+	if completion != 20 {
+		t.Fatalf("unexpected completion tokens: got %d want %d", completion, 20)
+	}
+}
+
+func TestTokenStats_MetricNamePreservesDotsInUID(t *testing.T) {
+	jwt := mustJWTWithUID("user.name")
+
+	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
+  - api.example.com
+rate_limits:
+  - api_key: "`+jwt+`"
+    max_concurrent: 1
+
+token_statistics:
+  enabled: true
+  metric_key_limit: 5000
+error_response:
+  status_code: 429
+  message: Rate limit exceeded
+`))
+	defer reset()
+
+	contextID := host.InitializeHttpContext()
+	action := host.CallOnRequestHeaders(contextID, [][2]string{
+		{":authority", "api.example.com"},
+		{"authorization", "Bearer " + jwt},
+	}, false)
+	if action != types.ActionContinue {
+		t.Fatalf("expected request to continue, got %v", action)
+	}
+
+	host.CallOnResponseBody(contextID, []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":20}}`), true)
+	host.CompleteHttpContext(contextID)
+
+	prompt, err := host.GetCounterMetric("llm.prompt_tokens_total.__host0domain__.api.example.com.__user0id__.user.name")
+	if err != nil {
+		t.Fatalf("GetCounterMetric(prompt): %v", err)
+	}
+	if prompt != 10 {
+		t.Fatalf("unexpected prompt tokens: got %d want %d", prompt, 10)
+	}
+
+	completion, err := host.GetCounterMetric("llm.completion_tokens_total.__host0domain__.api.example.com.__user0id__.user.name")
+	if err != nil {
+		t.Fatalf("GetCounterMetric(completion): %v", err)
+	}
+	if completion != 20 {
+		t.Fatalf("unexpected completion tokens: got %d want %d", completion, 20)
+	}
+}
+
 func TestTokenStats_MetricKeyLimitOverflowsToOther(t *testing.T) {
 	jwt1 := mustJWTWithUID("u1")
 	jwt2 := mustJWTWithUID("u2")
