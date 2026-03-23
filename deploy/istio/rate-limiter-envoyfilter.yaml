@@ -85,6 +85,6 @@ spec:
             use_all_default_tags: true
             stats_tags:
               - tag_name: uid
-                regex: '(\\.__user0id__\.(.+))$'
+                regex: '(\.__user0id__\.(.+))$'
               - tag_name: domain
-                regex: '(\\.__host0domain__\.(.+))$'
+                regex: '(\.__host0domain__\.(.+))$'
