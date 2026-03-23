@@ -8,6 +8,53 @@ import (
 	"github.com/tetratelabs/proxy-wasm-go-sdk/proxywasm/types"
 )
 
+func TestTokenStats_MetricNameFormat(t *testing.T) {
+	jwt := mustJWTWithUID("sfe-platform")
+
+	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
+  - llm-svc.domain
+rate_limits:
+  - api_key: "`+jwt+`"
+    max_concurrent: 1
+
+token_statistics:
+  enabled: true
+  metric_key_limit: 5000
+error_response:
+  status_code: 429
+  message: Rate limit exceeded
+`))
+	defer reset()
+
+	contextID := host.InitializeHttpContext()
+	action := host.CallOnRequestHeaders(contextID, [][2]string{
+		{":authority", "llm-svc.domain"},
+		{"authorization", "Bearer " + jwt},
+	}, false)
+	if action != types.ActionContinue {
+		t.Fatalf("expected request to continue, got %v", action)
+	}
+
+	host.CallOnResponseBody(contextID, []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":20}}`), true)
+	host.CompleteHttpContext(contextID)
+
+	prompt, err := host.GetCounterMetric("llm.prompt_tokens_total.__host0domain__.llm-svc.domain.__user0id__.sfe-platform")
+	if err != nil {
+		t.Fatalf("GetCounterMetric(prompt): %v", err)
+	}
+	if prompt != 10 {
+		t.Fatalf("unexpected prompt tokens: got %d want %d", prompt, 10)
+	}
+
+	completion, err := host.GetCounterMetric("llm.completion_tokens_total.__host0domain__.llm-svc.domain.__user0id__.sfe-platform")
+	if err != nil {
+		t.Fatalf("GetCounterMetric(completion): %v", err)
+	}
+	if completion != 20 {
+		t.Fatalf("unexpected completion tokens: got %d want %d", completion, 20)
+	}
+}
+
 func TestTokenStats_MetricsIncrementedForUID(t *testing.T) {
 	jwt := mustJWTWithUID("123")
 
@@ -41,7 +88,7 @@ error_response:
 	// Stream done should flush metrics.
 	host.CompleteHttpContext(contextID)
 
-	prompt, err := host.GetCounterMetric("llm_prompt_tokens_total;domain=api.example.com;uid=123;")
+	prompt, err := host.GetCounterMetric("llm.prompt_tokens_total.__host0domain__.api.example.com.__user0id__.123")
 	if err != nil {
 		t.Fatalf("GetCounterMetric(prompt): %v", err)
 	}
@@ -49,7 +96,7 @@ error_response:
 		t.Fatalf("unexpected prompt tokens: got %d want %d", prompt, 10)
 	}
 
-	completion, err := host.GetCounterMetric("llm_completion_tokens_total;domain=api.example.com;uid=123;")
+	completion, err := host.GetCounterMetric("llm.completion_tokens_total.__host0domain__.api.example.com.__user0id__.123")
 	if err != nil {
 		t.Fatalf("GetCounterMetric(completion): %v", err)
 	}
@@ -96,15 +143,15 @@ error_response:
 	}
 
 	// First two should have their own series.
-	if v, err := host.GetCounterMetric("llm_prompt_tokens_total;domain=api.example.com;uid=u1;"); err != nil || v != 1 {
+	if v, err := host.GetCounterMetric("llm.prompt_tokens_total.__host0domain__.api.example.com.__user0id__.u1"); err != nil || v != 1 {
 		t.Fatalf("uid=u1 prompt got (%d,%v)", v, err)
 	}
-	if v, err := host.GetCounterMetric("llm_prompt_tokens_total;domain=api.example.com;uid=u2;"); err != nil || v != 1 {
+	if v, err := host.GetCounterMetric("llm.prompt_tokens_total.__host0domain__.api.example.com.__user0id__.u2"); err != nil || v != 1 {
 		t.Fatalf("uid=u2 prompt got (%d,%v)", v, err)
 	}
 
 	// Third should overflow to __other__.
-	if v, err := host.GetCounterMetric("llm_prompt_tokens_total;domain=api.example.com;uid=__other__;"); err != nil || v != 1 {
+	if v, err := host.GetCounterMetric("llm.prompt_tokens_total.__host0domain__.api.example.com.__user0id__.__other__"); err != nil || v != 1 {
 		t.Fatalf("uid=__other__ prompt got (%d,%v)", v, err)
 	}
 }
@@ -142,7 +189,7 @@ error_response:
 	host.CompleteHttpContext(contextID)
 
 	// Any token stats metric should not exist.
-	if _, err := host.GetCounterMetric("llm_prompt_tokens_total;domain=api.example.com;uid=__other__;"); err == nil {
+	if _, err := host.GetCounterMetric("llm.prompt_tokens_total.__host0domain__.api.example.com.__user0id__.__other__"); err == nil {
 		t.Fatal("expected no token stats metric when uid parsing fails")
 	}
 }
@@ -294,7 +341,7 @@ error_response:
 
 	host.CompleteHttpContext(contextID)
 
-	prompt, err := host.GetCounterMetric("llm_prompt_tokens_total;domain=api.example.com;uid=123;")
+	prompt, err := host.GetCounterMetric("llm.prompt_tokens_total.__host0domain__.api.example.com.__user0id__.123")
 	if err != nil {
 		t.Fatalf("GetCounterMetric(prompt): %v", err)
 	}
@@ -302,7 +349,7 @@ error_response:
 		t.Fatalf("unexpected prompt tokens: got %d want %d", prompt, 4)
 	}
 
-	completion, err := host.GetCounterMetric("llm_completion_tokens_total;domain=api.example.com;uid=123;")
+	completion, err := host.GetCounterMetric("llm.completion_tokens_total.__host0domain__.api.example.com.__user0id__.123")
 	if err != nil {
 		t.Fatalf("GetCounterMetric(completion): %v", err)
 	}
@@ -344,7 +391,7 @@ error_response:
 	host.CallOnResponseBody(contextID, []byte("data: {not json}\n"), true)
 	host.CompleteHttpContext(contextID)
 
-	errs, err := host.GetCounterMetric("llm_stream_parse_errors_total;domain=api.example.com;uid=123;")
+	errs, err := host.GetCounterMetric("llm.stream_parse_errors_total.__host0domain__.api.example.com.__user0id__.123")
 	if err != nil {
 		t.Fatalf("GetCounterMetric(parse_errors): %v", err)
 	}
