@@ -7,6 +7,37 @@
 - `rate-limiter-envoyfilter.yaml` - Istio EnvoyFilter 配置，用于加载和配置 WASM 插件
 - `rate-limiter-plugin-config.yaml` - 插件配置示例（独立配置文件）
 - `counter-service-deployment.yaml` - Counter Service 部署配置（用于分布式限流）
+- `istio-mesh-config-example.yaml` - Istio 1.13 mesh config ConfigMap 示例，用于声明 token metrics 所需的原生 labels
+
+## Istio 1.13 token metrics 标签说明
+
+对于 Istio 1.13.5，只有部署 `rate-limiter-envoyfilter.yaml` 还不足以让 Prometheus 中的 token metrics 自动带上 `domain` 和 `uid` labels。这个版本需要在 mesh config 中通过 `defaultConfig.extraStatTags` 显式声明这两个 tag，Envoy 才会把插件输出的统计维度作为原生 label 暴露出来。
+
+当前推荐做法如下：
+
+1. 部署本目录的 EnvoyFilter，使 WASM 插件产生对应统计维度。
+2. 同时在 Istio mesh config 中声明 `defaultConfig.extraStatTags: [domain, uid]`。
+3. 可参考新增的 `istio-mesh-config-example.yaml`，它提供了适用于 Istio 1.13 的完整 `ConfigMap` 示例产物。
+
+需要特别说明：
+
+- 自定义 EnvoyFilter BOOTSTRAP regex 不是 Istio 1.13.5 获取这些 labels 的支持路径。
+- Prometheus 中的 metric name 不需要改名；完成 mesh config 声明后，原有 metric 会直接带出 `domain` 和 `uid` labels。
+- 旧的 `stats_config`、`stats_tags` 或基于 `__host0domain__`、`__user0id__` 的方案仅可作为历史背景说明，不应视为当前部署指令。
+
+### Istio 1.13 mesh config 示例
+
+先根据环境审阅并合并 `istio-mesh-config-example.yaml` 中的 `ConfigMap` 内容，再应用到 `istio-system/istio`：
+
+```bash
+kubectl apply -f deploy/istio/istio-mesh-config-example.yaml
+```
+
+如果集群中已存在其他 mesh 配置项，请将示例中的 `defaultConfig.extraStatTags` 合并进现有 `data.mesh`，不要直接覆盖掉无关配置。
+
+### 历史方案说明（非当前方案）
+
+历史排查中可能会见到通过 `stats_config`、`stats_tags` 或自定义 BOOTSTRAP regex 注入标签的做法。这些路径在当前目标版本中不作为正式支持方案，本目录新增的 mesh config example 才是当前依赖项示例。
 
 ## 部署模式
 
