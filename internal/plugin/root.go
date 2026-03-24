@@ -513,11 +513,15 @@ func (r *rootContext) ensureMetricKey(domain, uid string) (finalUID string, key 
 	return uid, key
 }
 
+func buildMetricName(metric, domain, uid string) string {
+	return fmt.Sprintf("llm.%s.;domain=.=%s;.;uid=.=%s;.;", metric, domain, uid)
+}
+
 func (r *rootContext) getPromptCounter(domain, uid, key string) proxywasm.MetricCounter {
 	if c, ok := r.metricPromptTokens[key]; ok {
 		return c
 	}
-	c := proxywasm.DefineCounterMetric(fmt.Sprintf("llm_prompt_tokens_total;domain=%s;uid=%s;", domain, uid))
+	c := proxywasm.DefineCounterMetric(buildMetricName("prompt_tokens_total", domain, uid))
 	r.metricPromptTokens[key] = c
 	return c
 }
@@ -526,7 +530,7 @@ func (r *rootContext) getCompletionCounter(domain, uid, key string) proxywasm.Me
 	if c, ok := r.metricCompletionTokens[key]; ok {
 		return c
 	}
-	c := proxywasm.DefineCounterMetric(fmt.Sprintf("llm_completion_tokens_total;domain=%s;uid=%s;", domain, uid))
+	c := proxywasm.DefineCounterMetric(buildMetricName("completion_tokens_total", domain, uid))
 	r.metricCompletionTokens[key] = c
 	return c
 }
@@ -535,11 +539,10 @@ func (r *rootContext) getParseErrorsCounter(domain, uid, key string) proxywasm.M
 	if c, ok := r.metricParseErrors[key]; ok {
 		return c
 	}
-	c := proxywasm.DefineCounterMetric(fmt.Sprintf("llm_stream_parse_errors_total;domain=%s;uid=%s;", domain, uid))
+	c := proxywasm.DefineCounterMetric(buildMetricName("stream_parse_errors_total", domain, uid))
 	r.metricParseErrors[key] = c
 	return c
 }
-
 
 func (h *httpContext) onAcquireResponse(numHeaders, bodySize, numTrailers int) {
 	h.pendingAcquire = false

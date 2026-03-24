@@ -7,6 +7,52 @@
 - `rate-limiter-envoyfilter.yaml` - Istio EnvoyFilter 配置，用于加载和配置 WASM 插件
 - `rate-limiter-plugin-config.yaml` - 插件配置示例（独立配置文件）
 - `counter-service-deployment.yaml` - Counter Service 部署配置（用于分布式限流）
+- `istio-mesh-config-example.yaml` - Istio 1.13 mesh config 完整 ConfigMap 形态示例，用于说明如何在 `istio-system/istio` 中声明 token metrics 所需的原生 labels；应用前必须先与现网 mesh 配置合并
+
+## Istio 1.13 token metrics 标签说明
+
+对于 Istio 1.13.5，只有部署 `rate-limiter-envoyfilter.yaml` 还不足以让 Prometheus 中的 token metrics 自动带上 `domain` 和 `uid` labels。这个版本需要在 mesh config 中通过 `defaultConfig.extraStatTags` 显式声明这两个 tag，Envoy 才会把插件输出的统计维度作为原生 label 暴露出来。
+
+当前推荐做法如下：
+
+1. 部署本目录的 EnvoyFilter，使 WASM 插件产生对应统计维度。
+2. 同时在 Istio mesh config 中声明 `defaultConfig.extraStatTags: [domain, uid]`。
+3. 可参考新增的 `istio-mesh-config-example.yaml`，它提供了适用于 Istio 1.13 的完整 `ConfigMap` 形态示例，便于把 `defaultConfig.extraStatTags` 合并进现有 mesh 配置。
+
+需要特别说明：
+
+- 自定义 EnvoyFilter BOOTSTRAP regex 不是 Istio 1.13.5 获取这些 labels 的支持路径。
+- Prometheus 中的 metric name 不需要改名；完成 mesh config 声明后，原有 metric 会直接带出 `domain` 和 `uid` labels。
+- 旧的 `stats_config`、`stats_tags` 或基于 `__host0domain__`、`__user0id__` 的方案仅可作为历史背景说明，不应视为当前部署指令。
+
+### Istio 1.13 mesh config 示例
+
+active guidance 应聚焦在更新现网 `istio-system/istio` 的 `data.mesh`：将 `defaultConfig.extraStatTags` 中的 `domain`、`uid` 合并进当前 mesh 配置，而不是把示例文件当作现成部署清单直接 apply。
+
+推荐流程：
+
+1. 先导出并审阅当前集群中的 `istio-system/istio` ConfigMap。
+2. 在现有 `data.mesh` 中补充：
+   ```yaml
+   defaultConfig:
+     extraStatTags:
+       - domain
+       - uid
+   ```
+3. 确认没有覆盖掉现网已有的 mesh 配置项后，再把合并后的结果回写到集群。
+4. `deploy/istio/istio-mesh-config-example.yaml` 仅作为完整 `ConfigMap` 形态参考，用来帮助定位 `data.mesh` 的写法，不是当前推荐的直接 apply 主路径。
+
+需要特别说明：
+
+- `istio-mesh-config-example.yaml` 中的 `accessLogFile`、`enablePrometheusMerge`、`trustDomain` 等字段只是为了展示一个更完整的 `ConfigMap` 形态；它们不是 token metrics labels 的最小必需项。
+- 对当前需求，关键依赖仍然只有把 `defaultConfig.extraStatTags` 中的 `domain`、`uid` 合并进现网 mesh 配置。
+- 自定义 EnvoyFilter BOOTSTRAP regex 仅作为历史说明，不是当前部署指令。
+
+也就是说：EnvoyFilter-only 仍然不够，`extraStatTags` 仍然是当前方案的显式依赖；而完整示例文件的作用是“参考合并形态”，不是“直接覆盖 apply”。
+
+### 历史方案说明（非当前方案）
+
+历史排查中可能会见到通过 `stats_config`、`stats_tags` 或自定义 BOOTSTRAP regex 注入标签的做法。这些路径在当前目标版本中不作为正式支持方案，本目录新增的 mesh config example 才是当前依赖项示例。
 
 ## 部署模式
 
