@@ -34,7 +34,7 @@
 - 工作原理：
   - 请求到达时：优先检查该 API Key 的全局 in-flight 计数，若 < max_concurrent 则放行并计数 +1，否则拒绝
   - 请求完成时（收到响应或连接断开）：全局计数 -1
-  - 当分布式计数存储不可用时，插件自动降级为单实例本地 in-flight 计数模式，保证服务可用性；同时记录降级状态与恢复状态，用于运维观测
+  - 当分布式计数存储不可用时，插件采用 fail-open 策略放行请求，保证主链路可用性；同时记录异常与恢复状态用于运维观测
 - 不同的 API Key 可配置不同的最大并发数
 - 实时跟踪每个 API Key 的当前 in-flight 请求数
 - 插件需避免因重试、超时、连接中断或重复回调导致计数泄漏或重复扣减
@@ -92,7 +92,7 @@ rate_limits:
 distributed_limit:
   enabled: true
   backend: "redis"            # 首版必须交付 redis 后端实现，作为默认分布式共享计数方案
-  fallback_to_local: true      # 分布式存储异常时降级为本地限流
+  fallback_to_local: true      # 分布式存储异常时采用 fail-open 放行（字段名沿用历史命名）
   key_prefix: "ratelimit:inflight"
   redis:
     address: "redis.default.svc.cluster.local:6379"
@@ -154,22 +154,19 @@ token_statistics:
 ### 2.4 错误响应格式
 
 #### 2.4.1 超限响应
-```json
-{
-  "error": "rate_limit_exceeded",
-  "message": "并发请求数已达到限制",
-  "api_key": "key_***_001",  // 部分隐藏
-  "limit": 10,
-  "retry_after": 1  // 建议重试时间（秒）
-}
+```http
+HTTP/1.1 429 Too Many Requests
+Content-Type: text/plain; charset=utf-8
+
+Rate limit exceeded for API key
 ```
 
 #### 2.4.2 无效 API Key 响应
-```json
-{
-  "error": "invalid_api_key",
-  "message": "Authorization 头缺失、格式非法，或其中的 API Key 未在限流配置中注册"
-}
+```http
+HTTP/1.1 429 Too Many Requests
+Content-Type: text/plain; charset=utf-8
+
+Rate limit exceeded for API key
 ```
 
 ## 3. 非功能需求
@@ -183,7 +180,7 @@ token_statistics:
 - 插件崩溃不应影响 Envoy 主进程
 - 配置错误应有明确的错误提示
 - 限流状态应准确，避免误判
-- 分布式共享计数存储异常时，插件必须自动降级到单实例本地限流模式，并在共享存储恢复后可平滑恢复到分布式模式
+- 分布式共享计数存储异常时，插件必须采用 fail-open 策略放行请求，并在后端恢复后自动回到正常分布式限流判定
 
 ### 3.3 可观测性
 - 记录关键操作日志
@@ -191,8 +188,8 @@ token_statistics:
   - 每个 API Key 的当前并发数
   - 限流拒绝次数
   - 请求处理延迟
-  - distributed_limit_degrade_total (Counter): 分布式限流降级次数
-  - distributed_limit_recover_total (Counter): 分布式限流恢复次数
+  - distributed_limit_fail_open_total (Counter): 分布式后端异常触发 fail-open 的次数
+  - distributed_limit_recover_total (Counter): 分布式后端恢复次数
   - distributed_limit_backend_errors_total (Counter): 分布式后端访问失败次数
 - 暴露 LLM Token 指标 (新增)：
   - llm_prompt_tokens_total (Counter): 输入 Token 累计消耗。
@@ -214,7 +211,7 @@ token_statistics:
 - 请求到达时：优先读取全局共享计数，若 < max_concurrent 则执行原子 +1 并放行，否则拒绝
 - 请求完成时：执行原子 -1（通过 OnHttpResponseHeaders 或 OnLog 回调）
 - 分布式后端需提供原子自增、自减、过期保护或租约续期能力，避免请求异常退出后长期占用计数
-- 当分布式后端不可达或操作超时时，按配置自动切换为本地计数模式，并持续探测共享后端恢复状态
+- 当分布式后端不可达或操作超时时，按配置采用 fail-open 放行请求，并持续探测共享后端恢复状态
 - 需处理异常断开场景，确保计数器不会泄漏
 
 ### 4.2 配置热更新实现
@@ -295,7 +292,7 @@ token_statistics:
 - 验证限流准确性
 - 验证多实例部署下的全局并发限制准确性
 - 首版必须包含基于 Redis 后端的端到端集成测试
-- 验证分布式后端异常时的本地降级行为与恢复行为
+- 验证分布式后端异常时的 fail-open 行为与恢复行为
 - 压力测试验证性能
 
 ### 6.3 测试场景
@@ -313,8 +310,8 @@ token_statistics:
   - 同一 API Key 的请求分别落到多个 Envoy 实例，验证使用全局并发计数后总并发不超过阈值
   - 多个 API Key 并发访问，验证全局共享计数互不串扰
 - 分布式后端异常场景：
-  - Redis 不可用或超时，验证插件自动降级为本地限流模式
-  - Redis 恢复后，验证插件可平滑恢复为分布式限流模式
+  - Redis 不可用或超时，验证插件采用 fail-open 放行请求
+  - Redis 恢复后，验证插件可恢复为分布式限流判定
 - 配置热更新：
   - 运行中新增 API Key，验证新 Key 立即生效
   - 运行中修改 max_concurrent，验证新阈值生效

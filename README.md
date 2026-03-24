@@ -26,7 +26,7 @@ distributed_limit:
   enabled: true
   backend: counter_service
   counter_service:
-    cluster: ratelimit-service
+    cluster: counter-service
     acquire_path: /acquire
     release_path: /release
     timeout_ms: 5000
@@ -124,7 +124,7 @@ Content-Type: application/json
 
 **Acquire 响应（拒绝 - 超限）：**
 ```json
-HTTP/1.1 429 Too Many Requests
+HTTP/1.1 200 OK
 Content-Type: application/json
 
 {
@@ -137,12 +137,23 @@ Content-Type: application/json
 
 **Acquire 响应（拒绝 - 配置未找到）：**
 ```json
-HTTP/1.1 404 Not Found
+HTTP/1.1 200 OK
 Content-Type: application/json
 
 {
   "allowed": false,
   "reason": "config_not_found"
+}
+```
+
+**Acquire 响应（拒绝 - Redis 不可用）：**
+```json
+HTTP/1.1 503 Service Unavailable
+Content-Type: application/json
+
+{
+  "allowed": false,
+  "reason": "redis_unavailable"
 }
 ```
 
@@ -206,8 +217,8 @@ kubectl apply -f counter-service-deployment.yaml
 
 确保 Counter Service 正常运行：
 ```bash
-kubectl get pods -l app=ratelimit-service
-kubectl logs -l app=ratelimit-service
+kubectl get pods -l app=counter-service
+kubectl logs -l app=counter-service
 
 # 检查健康状态
 kubectl exec -it <counter-service-pod> -- curl http://localhost:8080/health
@@ -347,7 +358,7 @@ curl -X PUT http://<counter-service-ip>:8080/config \
   }'
 ```
 
-禁用后，该 API Key 的所有请求将被拒绝（404 config_not_found）。
+禁用后，`POST /acquire` 会返回 `HTTP 200 + allowed=false + reason=api_key_disabled`；网关侧请求会按插件 `error_response` 被拒绝（默认 429）。
 
 ### 删除配置
 
@@ -456,13 +467,13 @@ configs.json 示例：
 
 1. 检查 Counter Service 是否运行：
    ```bash
-   kubectl get pods -l app=ratelimit-service
+   kubectl get pods -l app=counter-service
    ```
 
 2. 检查网络连通性：
    ```bash
    kubectl exec <gateway-pod> -n istio-system -- \
-     curl -v http://ratelimit-service.default.svc.cluster.local:8080/health
+     curl -v http://counter-service.default.svc.cluster.local:8080/health
    ```
 
 3. 检查 Envoy 集群配置：
@@ -526,4 +537,3 @@ active guidance 应聚焦在更新现网 `istio-system/istio` 的 `data.mesh`：
 ### 历史方案说明（非当前方案）
 
 历史排查中可能会见到通过 `stats_config`、`stats_tags` 或自定义 BOOTSTRAP regex 注入标签的做法。这些路径在当前目标版本中不作为正式支持方案，本目录新增的 mesh config example 才是当前依赖项示例。
-
