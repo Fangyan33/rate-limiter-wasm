@@ -514,7 +514,7 @@ func (r *rootContext) ensureMetricKey(domain, uid string) (finalUID string, key 
 }
 
 func buildMetricName(metric, domain, uid string) string {
-	return fmt.Sprintf("llm.%s.__host0domain__.%s.__user0id__.%s", metric, domain, uid)
+	return fmt.Sprintf("llm.%s.;domain=.=%s;.;uid=.=%s;.;", metric, domain, uid)
 }
 
 func (r *rootContext) getPromptCounter(domain, uid, key string) proxywasm.MetricCounter {
@@ -543,7 +543,6 @@ func (r *rootContext) getParseErrorsCounter(domain, uid, key string) proxywasm.M
 	r.metricParseErrors[key] = c
 	return c
 }
-
 
 func (h *httpContext) onAcquireResponse(numHeaders, bodySize, numTrailers int) {
 	h.pendingAcquire = false
