@@ -7,7 +7,7 @@
 - `rate-limiter-envoyfilter.yaml` - Istio EnvoyFilter 配置，用于加载和配置 WASM 插件
 - `rate-limiter-plugin-config.yaml` - 插件配置示例（独立配置文件）
 - `counter-service-deployment.yaml` - Counter Service 部署配置（用于分布式限流）
-- `istio-mesh-config-example.yaml` - Istio 1.13 mesh config ConfigMap 示例，用于声明 token metrics 所需的原生 labels
+- `istio-mesh-config-example.yaml` - Istio 1.13 mesh config 完整 ConfigMap 形态示例，用于说明如何在 `istio-system/istio` 中声明 token metrics 所需的原生 labels；应用前必须先与现网 mesh 配置合并
 
 ## Istio 1.13 token metrics 标签说明
 
@@ -17,7 +17,7 @@
 
 1. 部署本目录的 EnvoyFilter，使 WASM 插件产生对应统计维度。
 2. 同时在 Istio mesh config 中声明 `defaultConfig.extraStatTags: [domain, uid]`。
-3. 可参考新增的 `istio-mesh-config-example.yaml`，它提供了适用于 Istio 1.13 的完整 `ConfigMap` 示例产物。
+3. 可参考新增的 `istio-mesh-config-example.yaml`，它提供了适用于 Istio 1.13 的完整 `ConfigMap` 形态示例，便于把 `defaultConfig.extraStatTags` 合并进现有 mesh 配置。
 
 需要特别说明：
 
@@ -27,13 +27,13 @@
 
 ### Istio 1.13 mesh config 示例
 
-先根据环境审阅并合并 `istio-mesh-config-example.yaml` 中的 `ConfigMap` 内容，再应用到 `istio-system/istio`：
+先根据环境审阅并合并 `istio-mesh-config-example.yaml` 中的 `ConfigMap` 内容，再应用到 `istio-system/istio`。该文件提供的是完整 `ConfigMap` 形态，目的是让需要编辑 `data.mesh` 的位置更直观；但它不是可以不加审阅直接覆盖线上 mesh 配置的清单：
 
 ```bash
 kubectl apply -f deploy/istio/istio-mesh-config-example.yaml
 ```
 
-如果集群中已存在其他 mesh 配置项，请将示例中的 `defaultConfig.extraStatTags` 合并进现有 `data.mesh`，不要直接覆盖掉无关配置。
+如果集群中已存在其他 mesh 配置项，请将示例中的 `defaultConfig.extraStatTags` 合并进现有 `data.mesh`，不要直接覆盖掉无关配置。也就是说：EnvoyFilter-only 仍然不够，`extraStatTags` 仍然是当前方案的显式依赖；而自定义 BOOTSTRAP regex 仅作为历史说明，不是当前部署指令。
 
 ### 历史方案说明（非当前方案）
 
