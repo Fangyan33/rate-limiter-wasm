@@ -8,6 +8,8 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o counter-service ./cmd/counter-service
 
+#RUN wget https://github.com/tinygo-org/tinygo/releases/download/v0.40.1/tinygo_0.40.1_amd64.deb && sudo dpkg -i tinygo_0.40.1_amd64.deb
+
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates
 WORKDIR /root/
