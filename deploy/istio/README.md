@@ -27,13 +27,28 @@
 
 ### Istio 1.13 mesh config 示例
 
-先根据环境审阅并合并 `istio-mesh-config-example.yaml` 中的 `ConfigMap` 内容，再应用到 `istio-system/istio`。该文件提供的是完整 `ConfigMap` 形态，目的是让需要编辑 `data.mesh` 的位置更直观；但它不是可以不加审阅直接覆盖线上 mesh 配置的清单：
+active guidance 应聚焦在更新现网 `istio-system/istio` 的 `data.mesh`：将 `defaultConfig.extraStatTags` 中的 `domain`、`uid` 合并进当前 mesh 配置，而不是把示例文件当作现成部署清单直接 apply。
 
-```bash
-kubectl apply -f deploy/istio/istio-mesh-config-example.yaml
-```
+推荐流程：
 
-如果集群中已存在其他 mesh 配置项，请将示例中的 `defaultConfig.extraStatTags` 合并进现有 `data.mesh`，不要直接覆盖掉无关配置。也就是说：EnvoyFilter-only 仍然不够，`extraStatTags` 仍然是当前方案的显式依赖；而自定义 BOOTSTRAP regex 仅作为历史说明，不是当前部署指令。
+1. 先导出并审阅当前集群中的 `istio-system/istio` ConfigMap。
+2. 在现有 `data.mesh` 中补充：
+   ```yaml
+   defaultConfig:
+     extraStatTags:
+       - domain
+       - uid
+   ```
+3. 确认没有覆盖掉现网已有的 mesh 配置项后，再把合并后的结果回写到集群。
+4. `deploy/istio/istio-mesh-config-example.yaml` 仅作为完整 `ConfigMap` 形态参考，用来帮助定位 `data.mesh` 的写法，不是当前推荐的直接 apply 主路径。
+
+需要特别说明：
+
+- `istio-mesh-config-example.yaml` 中的 `accessLogFile`、`enablePrometheusMerge`、`trustDomain` 等字段只是为了展示一个更完整的 `ConfigMap` 形态；它们不是 token metrics labels 的最小必需项。
+- 对当前需求，关键依赖仍然只有把 `defaultConfig.extraStatTags` 中的 `domain`、`uid` 合并进现网 mesh 配置。
+- 自定义 EnvoyFilter BOOTSTRAP regex 仅作为历史说明，不是当前部署指令。
+
+也就是说：EnvoyFilter-only 仍然不够，`extraStatTags` 仍然是当前方案的显式依赖；而完整示例文件的作用是“参考合并形态”，不是“直接覆盖 apply”。
 
 ### 历史方案说明（非当前方案）
 
