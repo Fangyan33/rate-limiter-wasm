@@ -20,13 +20,13 @@
 
 1. 已部署 redis、counter-service、nginx upstream、envoyfilter、gateway/virtualservice。
 2. 初始化配置（通过 `/config`）：
-   - `domain=llm-demo.local, api_key=key_basic_001, max_concurrent=1, enabled=true`
-   - `domain=llm-demo.local, api_key=key_premium_001, max_concurrent=2, enabled=true`
-   - `domain=*.example.com, api_key=key_basic_001, max_concurrent=1, enabled=true`
-   - `domain=*, api_key=key_global_001, max_concurrent=1, enabled=true`
-   - `domain=llm-demo.local, api_key=key_disabled_001, max_concurrent=1, enabled=false`
+   - `domain=llm-demo.local, api_key=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoiYmFzaWNfMDAxIn0.g9q4PUCSic8zCWUoOGOJzlFctaWCU7NujZ1JddmqQpo, max_concurrent=1, enabled=true`
+   - `domain=llm-demo.local, api_key=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoicHJlbWl1bV8wMDEifQ.QlWcEWMaaEMBtgXfMZXxcq6QusqsWX8on8mfYf_d8jk, max_concurrent=2, enabled=true`
+   - `domain=*.example.com, api_key=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoiYmFzaWNfMDAxIn0.g9q4PUCSic8zCWUoOGOJzlFctaWCU7NujZ1JddmqQpo, max_concurrent=1, enabled=true`
+   - `domain=*, api_key=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoiYmFzaWNfMDAxIn0.g9q4PUCSic8zCWUoOGOJzlFctaWCU7NujZ1JddmqQpo, max_concurrent=1, enabled=true`
+   - `domain=llm-demo.local, api_key=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoiZGlzYWJsZWRfMDAxIn0.i888xyaHcVMxJ4VdPfeABUs-MLVgOTXiKq3CojjISE8, max_concurrent=1, enabled=false`
 3. gateway 地址记为 `${GATEWAY}`，counter-service 地址记为 `${COUNTER}`。
-4. 默认请求路径：`/mock/v1/chat/completions`（返回包含 usage 的 JSON）。
+4. 默认请求路径：`/v1/chat/completions`（返回包含 usage 的 JSON）。
 
 ---
 
@@ -127,7 +127,7 @@ POST /acquire HTTP/1.1
 Host: counter-service:8080
 Content-Type: application/json
 
-{"domain":"llm-demo.local","api_key":"key_basic_001","ttl_ms":30000}
+{"domain":"llm-demo.local","api_key":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoiYmFzaWNfMDAxIn0.g9q4PUCSic8zCWUoOGOJzlFctaWCU7NujZ1JddmqQpo","ttl_ms":30000}
 ```
 
 **断言字段**
@@ -151,7 +151,7 @@ POST /acquire HTTP/1.1
 Host: counter-service:8080
 Content-Type: application/json
 
-{"domain":"llm-demo.local","api_key":"key_basic_001","ttl_ms":30000}
+{"domain":"llm-demo.local","api_key":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoiYmFzaWNfMDAxIn0.g9q4PUCSic8zCWUoOGOJzlFctaWCU7NujZ1JddmqQpo","ttl_ms":30000}
 ```
 
 **断言字段**
@@ -171,7 +171,7 @@ POST /acquire HTTP/1.1
 Host: counter-service:8080
 Content-Type: application/json
 
-{"domain":"llm-demo.local","api_key":"key_missing_001","ttl_ms":30000}
+{"domain":"llm-demo.local","api_key":"key_eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoibWlzc2luZ18wMDEifQ.TVdkapv2HwWXf5g1Ow6YVpHmMq43qP_LM__GuGwbifg","ttl_ms":30000}
 ```
 
 **断言字段**
@@ -189,7 +189,7 @@ POST /acquire HTTP/1.1
 Host: counter-service:8080
 Content-Type: application/json
 
-{"domain":"llm-demo.local","api_key":"key_disabled_001","ttl_ms":30000}
+{"domain":"llm-demo.local","api_key":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoiZGlzYWJsZWRfMDAxIn0.i888xyaHcVMxJ4VdPfeABUs-MLVgOTXiKq3CojjISE8","ttl_ms":30000}
 ```
 
 **断言字段**
@@ -253,7 +253,7 @@ POST /acquire HTTP/1.1
 Host: counter-service:8080
 Content-Type: application/json
 
-{"domain":"foo.example.com","api_key":"key_basic_001","ttl_ms":30000}
+{"domain":"foo.example.com","api_key":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoiYmFzaWNfMDAxIn0.g9q4PUCSic8zCWUoOGOJzlFctaWCU7NujZ1JddmqQpo","ttl_ms":30000}
 ```
 
 **断言字段**
@@ -271,7 +271,7 @@ POST /acquire HTTP/1.1
 Host: counter-service:8080
 Content-Type: application/json
 
-{"domain":"any.unknown.tld","api_key":"key_global_001","ttl_ms":30000}
+{"domain":"any.unknown.tld","api_key":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoiYmFzaWNfMDAxIn0.g9q4PUCSic8zCWUoOGOJzlFctaWCU7NujZ1JddmqQpo","ttl_ms":30000}
 ```
 
 **断言字段**
@@ -293,7 +293,7 @@ POST /acquire HTTP/1.1
 Host: counter-service:8080
 Content-Type: application/json
 
-{"domain":"llm-demo.local","api_key":"key_basic_001","ttl_ms":30000}
+{"domain":"llm-demo.local","api_key":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoiYmFzaWNfMDAxIn0.g9q4PUCSic8zCWUoOGOJzlFctaWCU7NujZ1JddmqQpo","ttl_ms":30000}
 ```
 
 **断言字段**
@@ -309,7 +309,7 @@ Content-Type: application/json
 
 **Request**
 ```http
-POST /mock/v1/chat/completions HTTP/1.1
+POST /v1/chat/completions HTTP/1.1
 Host: unmatched.local
 Content-Type: application/json
 
@@ -326,7 +326,7 @@ Content-Type: application/json
 
 **Request**
 ```http
-POST /mock/v1/chat/completions HTTP/1.1
+POST /v1/chat/completions HTTP/1.1
 Host: llm-demo.local
 Content-Type: application/json
 
@@ -344,7 +344,7 @@ Content-Type: application/json
 
 **Request**
 ```http
-POST /mock/v1/chat/completions HTTP/1.1
+POST /v1/chat/completions HTTP/1.1
 Host: llm-demo.local
 Authorization: Basic abc
 Content-Type: application/json
@@ -362,9 +362,9 @@ Content-Type: application/json
 
 **Request**
 ```http
-POST /mock/v1/chat/completions HTTP/1.1
+POST /v1/chat/completions HTTP/1.1
 Host: llm-demo.local
-Authorization: Bearer key_basic_001
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoiYmFzaWNfMDAxIn0.g9q4PUCSic8zCWUoOGOJzlFctaWCU7NujZ1JddmqQpo
 Content-Type: application/json
 
 {"messages":[{"role":"user","content":"hello"}]}
@@ -408,9 +408,9 @@ Content-Type: application/json
 
 **Request**
 ```http
-POST /mock/v1/chat/completions HTTP/1.1
+POST /v1/chat/completions HTTP/1.1
 Host: llm-demo.local
-Authorization: Bearer key_basic_001
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoiYmFzaWNfMDAxIn0.g9q4PUCSic8zCWUoOGOJzlFctaWCU7NujZ1JddmqQpo
 Content-Type: application/json
 
 {"messages":[{"role":"user","content":"hello"}]}
@@ -452,7 +452,7 @@ Content-Type: application/json
 ```http
 POST /v1/chat/completions HTTP/1.1
 Host: llm-demo.local
-Authorization: Bearer <JWT_WITH_UID_123>
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoiYmFzaWNfMDAxIn0.g9q4PUCSic8zCWUoOGOJzlFctaWCU7NujZ1JddmqQpo
 Content-Type: application/json
 
 {"stream":true,"messages":[{"role":"user","content":"hi"}]}
@@ -469,7 +469,7 @@ Content-Type: application/json
 **步骤**
 1. 将 ingressgateway 扩容到 2 副本
 2. 强制两路流量命中不同副本（可基于源地址/连接复用策略）
-3. 同时发起 2 个 `key_basic_001` 请求（limit=1）
+3. 同时发起 2 个 `basic_001` 对应 API key 请求（limit=1）
 
 **断言字段**
 1. 仅 1 个请求成功（200）
@@ -492,7 +492,7 @@ Content-Type: application/json
 ### E2E-GW-013 配置热更新：删除 key
 
 **步骤**
-1. 删除 `llm-demo.local + key_basic_001`
+1. 删除 `llm-demo.local + basic_001 对应 API key`
 2. 继续发该 key 请求
 
 **断言字段**
@@ -506,17 +506,17 @@ Content-Type: application/json
 
 **Request**
 ```http
-POST /mock/v1/chat/completions HTTP/1.1
+POST /v1/chat/completions HTTP/1.1
 Host: llm-demo.local
-Authorization: Bearer <JWT_WITH_UID_sfe-platform>
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoicHJlbWl1bV8wMDEifQ.QlWcEWMaaEMBtgXfMZXxcq6QusqsWX8on8mfYf_d8jk
 Content-Type: application/json
 
 {"messages":[{"role":"user","content":"hello"}]}
 ```
 
 **断言字段（抓取 ingress `/stats/prometheus`）**
-1. `llm_prompt_tokens_total{domain="llm-demo.local",uid="sfe-platform"}` 递增
-2. `llm_completion_tokens_total{domain="llm-demo.local",uid="sfe-platform"}` 递增
+1. `llm_prompt_tokens_total{domain="llm-demo.local",uid="premium_001"}` 递增
+2. `llm_completion_tokens_total{domain="llm-demo.local",uid="premium_001"}` 递增
 
 ---
 
@@ -538,7 +538,7 @@ Content-Type: application/json
 2. 抓指标
 
 **断言字段**
-1. `llm_stream_parse_errors_total{domain="llm-demo.local",uid="123"}` 递增
+1. `llm_stream_parse_errors_total{domain="llm-demo.local",uid="basic_001"}` 递增
 
 ---
 
@@ -546,7 +546,7 @@ Content-Type: application/json
 
 **Request**
 ```http
-POST /mock/v1/chat/completions HTTP/1.1
+POST /v1/chat/completions HTTP/1.1
 Host: llm-demo.local
 Authorization: Bearer abc
 Content-Type: application/json

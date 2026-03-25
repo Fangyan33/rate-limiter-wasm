@@ -87,13 +87,13 @@ defaultConfig:
    - `foo.example.com`（wildcard）
    - `unmatched.local`（bypass）
 2. API Key：
-   - `key_basic_001`（limit=1）
-   - `key_premium_001`（limit=2）
-   - `key_disabled_001`（enabled=false）
-   - `key_missing_001`（无配置）
-3. JWT：
-   - 合法 uid：`{"uid":"123"}`
-   - 合法 uid：`{"uid":"sfe-platform"}`
+   - `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoiYmFzaWNfMDAxIn0.g9q4PUCSic8zCWUoOGOJzlFctaWCU7NujZ1JddmqQpo`（uid=`basic_001`，limit=1）
+   - `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoicHJlbWl1bV8wMDEifQ.QlWcEWMaaEMBtgXfMZXxcq6QusqsWX8on8mfYf_d8jk`（uid=`premium_001`，limit=2）
+   - `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoiZGlzYWJsZWRfMDAxIn0.i888xyaHcVMxJ4VdPfeABUs-MLVgOTXiKq3CojjISE8`（uid=`disabled_001`，enabled=false）
+   - `key_eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoibWlzc2luZ18wMDEifQ.TVdkapv2HwWXf5g1Ow6YVpHmMq43qP_LM__GuGwbifg`（uid=`missing_001`，无配置）
+3. uid 解析样本：
+   - 从 basic key 解析出 uid=`basic_001`
+   - 从 premium key 解析出 uid=`premium_001`
    - 非法：非 JWT token（如 `abc`）
 
 ## 6. 通过标准
