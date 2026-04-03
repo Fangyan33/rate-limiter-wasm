@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-OUTPUT_PATH="${1:-$ROOT_DIR/dist/rate-limiter.wasm}"
+OUTPUT_PATH="${1:-$ROOT_DIR/rate-limiter.wasm}"
 
 if ! command -v tinygo >/dev/null 2>&1; then
   echo "tinygo is required but was not found in PATH" >&2
@@ -12,7 +12,8 @@ fi
 
 mkdir -p "$(dirname "$OUTPUT_PATH")"
 
-tinygo build -o "$OUTPUT_PATH" -scheduler=none -target=wasi "$ROOT_DIR"
+GOFLAGS="${GOFLAGS:-} -buildvcs=false" \
+  tinygo build -o "$OUTPUT_PATH" -scheduler=none -target=wasi "$ROOT_DIR"
 
 echo "built wasm artifact: $OUTPUT_PATH"
 

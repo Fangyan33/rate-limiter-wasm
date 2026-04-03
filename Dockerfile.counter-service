@@ -9,12 +9,20 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o counter-service ./cmd/counter-service
 
 #RUN wget https://github.com/tinygo-org/tinygo/releases/download/v0.40.1/tinygo_0.40.1_amd64.deb && sudo dpkg -i tinygo_0.40.1_amd64.deb
+FROM tinygo/tinygo:0.40.1 AS wasm-builder
+RUN go env -w GOPROXY=https://goproxy.cn,direct
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN ./build.sh
+
 
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates
 WORKDIR /root/
 COPY --from=builder /app/counter-service .
-COPY ./dist/rate-limiter.wasm ./rate-limiter.wasm
+COPY --from=wasm-builder /app/rate-limiter.wasm ./rate-limiter.wasm
 
 EXPOSE 8080
 CMD ["./counter-service"]
