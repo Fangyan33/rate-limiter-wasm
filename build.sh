@@ -15,3 +15,5 @@ mkdir -p "$(dirname "$OUTPUT_PATH")"
 tinygo build -o "$OUTPUT_PATH" -scheduler=none -target=wasi "$ROOT_DIR"
 
 echo "built wasm artifact: $OUTPUT_PATH"
+
+sha256sum $OUTPUT_PATH

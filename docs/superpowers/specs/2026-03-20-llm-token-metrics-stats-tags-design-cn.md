@@ -56,18 +56,18 @@ llm_prompt_tokens_total;domain=<domain>;uid=<uid>;
 使用与 Istio 1.13 针对 `domain` 和 `uid` 的内置统计标签提取兼容的内部统计名称形态，并通过 mesh config `defaultConfig.extraStatTags` 配置这些标签。
 **规范性兼容规则：** 目标行为同时取决于以下两点：
 1. 插件以此确切结构形态发送统计名称：
-   `llm.<metric>.;domain=.=<domain>;.;uid=.=<uid>;.;`
+   `llm.<metric>domain=.=<domain>;.;uid=.=<uid>;.;`
 2. 目标网关环境的 Istio mesh config 在 `defaultConfig.extraStatTags` 中列出 `domain` 和 `uid`
 如果缺少任一条件，则目标 `domain` / `uid` 标签对于 Istio 1.13.5 而言不被视为正确实现。
 ### 内部统计名称格式
 ```text
-llm.<metric>.;domain=.=<domain>;.;uid=.=<uid>;.;
+llm.<metric>domain=.=<domain>;.;uid=.=<uid>;.;
 ```
 示例：
 ```text
-llm.prompt_tokens_total.;domain=.=llm-svc.domain;.;uid=.=sfe-platform;.;
-llm.completion_tokens_total.;domain=.=llm-svc.domain;.;uid=.=sfe-platform;.;
-llm.stream_parse_errors_total.;domain=.=llm-svc.domain;.;uid=.=sfe-platform;.;
+llm.prompt_tokens_totaldomain=.=llm-svc.domain;.;uid=.=sfe-platform;.;
+llm.completion_tokens_totaldomain=.=llm-svc.domain;.;uid=.=sfe-platform;.;
+llm.stream_parse_errors_totaldomain=.=llm-svc.domain;.;uid=.=sfe-platform;.;
 ```
 配合 mesh config：
 ```yaml
@@ -95,11 +95,11 @@ llm.<metric>.__host0domain__.<domain>.__user0id__.<uid>
 ## 详细设计
 ### 1. 插件指标命名
 指标定义逻辑必须生成符合 Istio 1.13 兼容格式的名称：
-- `llm.%s.;domain=.=<domain>;.;uid=.=<uid>;.;`
+- `llm.%sdomain=.=<domain>;.;uid=.=<uid>;.;`
 一种可接受的实现是：
 ```go
 func buildMetricName(metric, domain, uid string) string {
-    return fmt.Sprintf("llm.%s.;domain=.=%s;.;uid=.=%s;.;", metric, domain, uid)
+    return fmt.Sprintf("llm.%sdomain=.=%s;.;uid=.=%s;.;", metric, domain, uid)
 }
 ```
 只要所有三个计数器系列发出相同的可观察统计名称格式，任何等效的实现都是可以接受的。
@@ -122,7 +122,7 @@ func buildMetricName(metric, domain, uid string) string {
 - 非 ASCII 字符
 这很重要，因为内部统计名称契约取决于分隔符结构的完整性：
 ```text
-;domain=.=<domain>;.;uid=.=<uid>;.;
+domain=.=<domain>;.;uid=.=<uid>;.;
 ```
 因此，只有在能保持 Istio 1.13 标签提取识别该结构的能力时，才接受净化器的更改。特别是，必须不允许净化后的值注入或保留会破坏 `domain` / `uid` 段边界的分隔符字符。
 ### 3. Istio 1.13 标签提取模型
@@ -177,9 +177,9 @@ llm_stream_parse_errors_total{domain="llm-svc.domain", uid="sfe-platform"}
 ## 测试策略
 ### 插件测试
 更新 `internal/plugin/token_stats_test.go` 以断言新的内部统计名称格式：
-- `llm.prompt_tokens_total.;domain=.=api.example.com;.;uid=.=123;.;`
-- `llm.completion_tokens_total.;domain=.=api.example.com;.;uid=.=123;.;`
-- `llm.stream_parse_errors_total.;domain=.=api.example.com;.;uid=.=123;.;`
+- `llm.prompt_tokens_totaldomain=.=api.example.com;.;uid=.=123;.;`
+- `llm.completion_tokens_totaldomain=.=api.example.com;.;uid=.=123;.;`
+- `llm.stream_parse_errors_totaldomain=.=api.example.com;.;uid=.=123;.;`
 同时更新边界情况测试，使其继续验证：
 - 包含 `.` 的域得到保留
 - 包含 `-` 的 UID 得到保留

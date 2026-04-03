@@ -32,9 +32,9 @@
    - SSE 增量 usage 提取
    - `stream: true` 时请求体自动注入 `stream_options.include_usage=true`
 11. 指标内部命名格式：
-   - `llm.prompt_tokens_total.;domain=.=<domain>;.;uid=.=<uid>;.;`
-   - `llm.completion_tokens_total.;domain=.=<domain>;.;uid=.=<uid>;.;`
-   - `llm.stream_parse_errors_total.;domain=.=<domain>;.;uid=.=<uid>;.;`
+   - `llm.prompt_tokens_totaldomain=.=<domain>;.;uid=.=<uid>;.;`
+   - `llm.completion_tokens_totaldomain=.=<domain>;.;uid=.=<uid>;.;`
+   - `llm.stream_parse_errors_totaldomain=.=<domain>;.;uid=.=<uid>;.;`
 
 ## 3. 测试范围
 

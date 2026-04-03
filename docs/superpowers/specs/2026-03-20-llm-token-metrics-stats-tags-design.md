@@ -84,7 +84,7 @@ Use the internal stat-name shape that works with Istio 1.13 built-in stat tag ex
 **Normative compatibility rule:** the target behavior depends on both of the following being true at the same time:
 
 1. the plugin emits stat names in this exact structural shape:
-   `llm.<metric>.;domain=.=<domain>;.;uid=.=<uid>;.;`
+   `llm.<metric>domain=.=<domain>;.;uid=.=<uid>;.;`
 2. the Istio mesh config for the target gateway environment lists both `domain` and `uid` in `defaultConfig.extraStatTags`
 
 If either condition is missing, the target `domain` / `uid` labels are not considered correctly implemented for Istio 1.13.5.
@@ -92,15 +92,15 @@ If either condition is missing, the target `domain` / `uid` labels are not consi
 ### Internal stat name format
 
 ```text
-llm.<metric>.;domain=.=<domain>;.;uid=.=<uid>;.;
+llm.<metric>domain=.=<domain>;.;uid=.=<uid>;.;
 ```
 
 Examples:
 
 ```text
-llm.prompt_tokens_total.;domain=.=llm-svc.domain;.;uid=.=sfe-platform;.;
-llm.completion_tokens_total.;domain=.=llm-svc.domain;.;uid=.=sfe-platform;.;
-llm.stream_parse_errors_total.;domain=.=llm-svc.domain;.;uid=.=sfe-platform;.;
+llm.prompt_tokens_totaldomain=.=llm-svc.domain;.;uid=.=sfe-platform;.;
+llm.completion_tokens_totaldomain=.=llm-svc.domain;.;uid=.=sfe-platform;.;
+llm.stream_parse_errors_totaldomain=.=llm-svc.domain;.;uid=.=sfe-platform;.;
 ```
 
 With mesh config:
@@ -148,13 +148,13 @@ Rejected because the project’s target environment is explicitly Istio 1.13.5. 
 
 The metric definition logic must produce names in the Istio 1.13-compatible format:
 
-- `llm.%s.;domain=.=<domain>;.;uid=.=<uid>;.;`
+- `llm.%sdomain=.=<domain>;.;uid=.=<uid>;.;`
 
 One acceptable implementation is:
 
 ```go
 func buildMetricName(metric, domain, uid string) string {
-    return fmt.Sprintf("llm.%s.;domain=.=%s;.;uid=.=%s;.;", metric, domain, uid)
+    return fmt.Sprintf("llm.%sdomain=.=%s;.;uid=.=%s;.;", metric, domain, uid)
 }
 ```
 
@@ -189,7 +189,7 @@ It replaces clearly unsafe structural characters such as:
 This matters because the internal stat-name contract depends on the delimiter structure remaining intact:
 
 ```text
-;domain=.=<domain>;.;uid=.=<uid>;.;
+domain=.=<domain>;.;uid=.=<uid>;.;
 ```
 
 So sanitizer changes are only acceptable if they preserve the ability of Istio 1.13 tag extraction to recognize that structure. In particular, sanitized values must not be allowed to inject or preserve delimiter characters that would corrupt the `domain` / `uid` segment boundaries.
@@ -272,9 +272,9 @@ llm_stream_parse_errors_total{domain="llm-svc.domain", uid="sfe-platform"}
 
 Update `internal/plugin/token_stats_test.go` to assert the new internal stat-name format:
 
-- `llm.prompt_tokens_total.;domain=.=api.example.com;.;uid=.=123;.;`
-- `llm.completion_tokens_total.;domain=.=api.example.com;.;uid=.=123;.;`
-- `llm.stream_parse_errors_total.;domain=.=api.example.com;.;uid=.=123;.;`
+- `llm.prompt_tokens_totaldomain=.=api.example.com;.;uid=.=123;.;`
+- `llm.completion_tokens_totaldomain=.=api.example.com;.;uid=.=123;.;`
+- `llm.stream_parse_errors_totaldomain=.=api.example.com;.;uid=.=123;.;`
 
 Also update the edge-case tests so they continue to verify that:
 

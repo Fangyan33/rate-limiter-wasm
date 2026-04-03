@@ -17,12 +17,12 @@ data:
         location / {
             # 指向容器内的挂载目录
             root   /usr/share/nginx/html/files;
-            
+
             # 开启目录浏览功能
             autoindex on;
-            autoindex_exact_size off; # 显示文件大概大小（KB, MB）
-            autoindex_localtime on;   # 显示文件修改时间（本地时间）
-            
+            autoindex_exact_size off; # 显示文件大概大小(KB, MB)
+            autoindex_localtime on;   # 显示文件修改时间（本地时间)
+
             index  index.html index.htm;
         }
 
@@ -33,19 +33,18 @@ data:
 
          location /v1/chat/completions{
             # 后端 HTTPS API 地址
-            proxy_pass https://open.bigmodel.cn; 
+            proxy_pass https://open.bigmodel.cn;
 
             rewrite ^(.*)$ /api/paas/v4/chat/completions break;
             proxy_set_header Host open.bigmodel.cn;
             proxy_set_header Authorization "Bearer 9353c0ddee1b497f92ac0605bbd97dec.MIIBVAIBADANBgkqhkiG9w0BAQEFAASCAT4wggE6AgEAAkEAgi4CVONg7DSMVg68a8Pg6Ducrw29WVLvsgbwQk7d3hwqeU6+BosYnpRJ2Fl6xyYJ36gOZusM6JVnxgra/I0F9QIDAQABAkAcA/rMegKp0sVA3/r81jLYx7t4kORnDMo47fVWz9I/slFJRFz2HbQAdmm/Nzfz6ObU2JYF4KzVTRUo5MJT/HQBAiEAxFVAkpFupvtmZozxzHs43/DosWD2w6ZcpGCNKj2wSBUCIQCpvgR5GSWNshd8YsQMMFJSxtN+vTqpkVMlcquEcaJeYQIhAI+6PWhO8Stq9X7zhXwFZRCDw0U/T8bQ/hcT26Plvyw1AiA6du15fHTX2kiGmkomXJpuUndURv8mmpyF4Ho9MxqW4QIgKbQXjCRsDiBci8n0dsmzud9VaVIwbIMKzFIGIUZ9lhs=";
 
             # --- 关键配置 (针对HTTPS后端) ---
-            
             # 1. 验证后端服务器的SSL证书 (默认为on)
             # 如果后端是公网正规证书，保持 on 即可。
             # 如果后端是自签名证书，需要改为 off，否则会报 502 错误。
-            proxy_ssl_verify off; 
-            
+            proxy_ssl_verify off;
+
             # 2. SNI (Server Name Indication) 支持
             # 很多 HTTPS 服务器依赖 SNI 来返回正确的证书，建议开启
             proxy_ssl_server_name on;
@@ -54,7 +53,7 @@ data:
             # 默认情况下，Nginx 会把 Host 设为 proxy_pass 中的域名 (api.example.com)
             # 如果后端对 Host 头敏感，可以用 set_header 修改
             proxy_set_header Host $host; # 或者$proxy_host (后端域名)
-            
+
             # --- 通用代理配置 ---
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -64,7 +63,6 @@ data:
             proxy_connect_timeout 60s;
             proxy_read_timeout 60s;
             proxy_send_timeout 60s;
-         
          }
 
         error_page   500 502 503 504  /50x.html;
@@ -72,7 +70,6 @@ data:
             root   /usr/share/nginx/html;
         }
     }
-
 
 
     

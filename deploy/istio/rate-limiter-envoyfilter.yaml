@@ -53,12 +53,13 @@ spec:
                       uri: http://counter-service.default.svc.cluster.local:8080/wasm/rate-limiter.wasm
                       cluster: counter-service
                       timeout: 10s
-                    sha256: bcbbe8b98a496ea040832a0ed4888c63cdb7eb10470fa7a0c767d448e78e7326
+                    sha256: 21a4268d2c7f72a679dbbaad21b025cc0236219048594cf7791628302b33a4be
               configuration:
                 "@type": type.googleapis.com/google.protobuf.StringValue
                 value: |
                   domains:
                     - llm-demo.local
+                    - vllm-083.default.paic.com.cn
                   token_statistics:
                     enabled: true
                     inject_stream_usage: true

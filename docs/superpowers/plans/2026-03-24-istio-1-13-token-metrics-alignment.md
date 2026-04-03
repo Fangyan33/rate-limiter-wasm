@@ -42,8 +42,8 @@
 Update `TestTokenStats_MetricNameFormat` to expect:
 
 ```text
-llm.prompt_tokens_total.;domain=.=llm-svc.domain;.;uid=.=sfe-platform;.;
-llm.completion_tokens_total.;domain=.=llm-svc.domain;.;uid=.=sfe-platform;.;
+llm.prompt_tokens_totaldomain=.=llm-svc.domain;.;uid=.=sfe-platform;.;
+llm.completion_tokens_totaldomain=.=llm-svc.domain;.;uid=.=sfe-platform;.;
 ```
 
 - [ ] **Step 2: Run the focused test to verify the current behavior**
@@ -63,7 +63,7 @@ Expected:
 Update the helper so that the observable output becomes exactly:
 
 ```text
-llm.<metric>.;domain=.=<domain>;.;uid=.=<uid>;.;
+llm.<metric>domain=.=<domain>;.;uid=.=<uid>;.;
 ```
 
 Do not change any token-accounting or request-flow logic.
@@ -92,10 +92,10 @@ Replace all remaining abandoned-format expectations in `internal/plugin/token_st
 Use expectations like:
 
 ```text
-llm.prompt_tokens_total.;domain=.=api.example.com;.;uid=.=123;.;
-llm.completion_tokens_total.;domain=.=api.example.com;.;uid=.=123;.;
-llm.stream_parse_errors_total.;domain=.=api.example.com;.;uid=.=123;.;
-llm.prompt_tokens_total.;domain=.=api.example.com;.;uid=.=__other__;.;
+llm.prompt_tokens_totaldomain=.=api.example.com;.;uid=.=123;.;
+llm.completion_tokens_totaldomain=.=api.example.com;.;uid=.=123;.;
+llm.stream_parse_errors_totaldomain=.=api.example.com;.;uid=.=123;.;
+llm.prompt_tokens_totaldomain=.=api.example.com;.;uid=.=__other__;.;
 ```
 
 - [ ] **Step 6: Run the focused token-stats package tests**
