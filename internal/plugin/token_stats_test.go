@@ -105,6 +105,64 @@ error_response:
 	}
 }
 
+func TestTokenStats_NonSSEMultiChunkParsingBuffersToEOS(t *testing.T) {
+	jwt := mustJWTWithUID("123")
+
+	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
+  - api.example.com
+rate_limits:
+  - api_key: "`+jwt+`"
+    max_concurrent: 1
+
+token_statistics:
+  enabled: true
+  metric_key_limit: 5000
+error_response:
+  status_code: 429
+  message: Rate limit exceeded
+`))
+	defer reset()
+
+	contextID := host.InitializeHttpContext()
+	action := host.CallOnRequestHeaders(contextID, [][2]string{
+		{":authority", "api.example.com"},
+		{"authorization", "Bearer " + jwt},
+	}, false)
+	if action != types.ActionContinue {
+		t.Fatalf("expected request to continue, got %v", action)
+	}
+
+	host.CallOnResponseHeaders(contextID, [][2]string{{"content-type", "application/json"}}, false)
+
+	action = host.CallOnResponseBody(contextID, []byte(`{"usage":{"prompt_tokens":10,`), false)
+	if action != types.ActionPause {
+		t.Fatalf("expected first non-SSE chunk to pause for buffering, got %v", action)
+	}
+
+	action = host.CallOnResponseBody(contextID, []byte(`"completion_tokens":20}}`), true)
+	if action != types.ActionContinue {
+		t.Fatalf("expected end-of-stream chunk to continue after parsing, got %v", action)
+	}
+
+	host.CompleteHttpContext(contextID)
+
+	prompt, err := host.GetCounterMetric("llm.prompt_tokens_totaldomain=.=api.example.com;.;uid=.=123;.;")
+	if err != nil {
+		t.Fatalf("GetCounterMetric(prompt): %v", err)
+	}
+	if prompt != 10 {
+		t.Fatalf("unexpected prompt tokens: got %d want %d", prompt, 10)
+	}
+
+	completion, err := host.GetCounterMetric("llm.completion_tokens_totaldomain=.=api.example.com;.;uid=.=123;.;")
+	if err != nil {
+		t.Fatalf("GetCounterMetric(completion): %v", err)
+	}
+	if completion != 20 {
+		t.Fatalf("unexpected completion tokens: got %d want %d", completion, 20)
+	}
+}
+
 func TestTokenStats_MetricNamePreservesSpecialChars(t *testing.T) {
 	jwt := mustJWTWithUID("sfe-platform")
 
@@ -563,6 +621,84 @@ error_response:
 	}
 	if completion != 6 {
 		t.Fatalf("unexpected completion tokens: got %d want %d", completion, 6)
+	}
+}
+
+func TestTokenStats_NonSSEMissingUsageDoesNotIncrementParseErrors(t *testing.T) {
+	jwt := mustJWTWithUID("123")
+
+	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
+  - api.example.com
+rate_limits:
+  - api_key: "`+jwt+`"
+    max_concurrent: 1
+
+token_statistics:
+  enabled: true
+  metric_key_limit: 5000
+error_response:
+  status_code: 429
+  message: Rate limit exceeded
+`))
+	defer reset()
+
+	contextID := host.InitializeHttpContext()
+	action := host.CallOnRequestHeaders(contextID, [][2]string{
+		{":authority", "api.example.com"},
+		{"authorization", "Bearer " + jwt},
+	}, false)
+	if action != types.ActionContinue {
+		t.Fatalf("expected continue, got %v", action)
+	}
+
+	host.CallOnResponseHeaders(contextID, [][2]string{{"content-type", "application/json"}}, false)
+	action = host.CallOnResponseBody(contextID, []byte(`{"id":"ok","object":"chat.completion"}`), true)
+	if action != types.ActionContinue {
+		t.Fatalf("expected continue, got %v", action)
+	}
+	host.CompleteHttpContext(contextID)
+
+	if _, err := host.GetCounterMetric("llm.stream_parse_errors_totaldomain=.=api.example.com;.;uid=.=123;.;"); err == nil {
+		t.Fatal("expected no parse error metric for valid JSON without usage")
+	}
+}
+
+func TestTokenStats_NonSSEZeroUsageDoesNotIncrementParseErrors(t *testing.T) {
+	jwt := mustJWTWithUID("123")
+
+	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
+  - api.example.com
+rate_limits:
+  - api_key: "`+jwt+`"
+    max_concurrent: 1
+
+token_statistics:
+  enabled: true
+  metric_key_limit: 5000
+error_response:
+  status_code: 429
+  message: Rate limit exceeded
+`))
+	defer reset()
+
+	contextID := host.InitializeHttpContext()
+	action := host.CallOnRequestHeaders(contextID, [][2]string{
+		{":authority", "api.example.com"},
+		{"authorization", "Bearer " + jwt},
+	}, false)
+	if action != types.ActionContinue {
+		t.Fatalf("expected continue, got %v", action)
+	}
+
+	host.CallOnResponseHeaders(contextID, [][2]string{{"content-type", "application/json"}}, false)
+	action = host.CallOnResponseBody(contextID, []byte(`{"usage":{"prompt_tokens":0,"completion_tokens":0}}`), true)
+	if action != types.ActionContinue {
+		t.Fatalf("expected continue, got %v", action)
+	}
+	host.CompleteHttpContext(contextID)
+
+	if _, err := host.GetCounterMetric("llm.stream_parse_errors_totaldomain=.=api.example.com;.;uid=.=123;.;"); err == nil {
+		t.Fatal("expected no parse error metric for zero usage")
 	}
 }
 

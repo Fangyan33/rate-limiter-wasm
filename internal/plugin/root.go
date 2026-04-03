@@ -314,16 +314,19 @@ func (h *httpContext) OnHttpResponseBody(bodySize int, endOfStream bool) types.A
 	// For non-SSE, we only parse when the full body is available.
 	if !isEventStream(h.responseContentType) {
 		if !endOfStream {
-			return types.ActionContinue
+			return types.ActionPause
 		}
 		body, err := proxywasm.GetHttpResponseBody(0, bodySize)
 		if err != nil {
 			h.streamParseErrors++
 			return types.ActionContinue
 		}
-		prompt, completion, ok := parseUsageFromJSON(body)
-		if !ok {
+		prompt, completion, status := parseUsageFromJSON(body)
+		switch status {
+		case usageParseInvalidJSON:
 			h.streamParseErrors++
+			return types.ActionContinue
+		case usageParseNoUsage:
 			return types.ActionContinue
 		}
 		h.promptTokens += prompt
@@ -345,20 +348,38 @@ func isEventStream(contentType string) bool {
 	return strings.Contains(contentType, "text/event-stream")
 }
 
-func parseUsageFromJSON(body []byte) (promptTokens int, completionTokens int, ok bool) {
+type usageParseStatus int
+
+const (
+	usageParseInvalidJSON usageParseStatus = iota
+	usageParseNoUsage
+	usageParseFoundUsage
+)
+
+func parseUsageFromJSON(body []byte) (promptTokens int, completionTokens int, status usageParseStatus) {
 	var payload struct {
-		Usage struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
+		Usage *struct {
+			PromptTokens     *int `json:"prompt_tokens"`
+			CompletionTokens *int `json:"completion_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return 0, 0, false
+		return 0, 0, usageParseInvalidJSON
 	}
-	if payload.Usage.PromptTokens == 0 && payload.Usage.CompletionTokens == 0 {
-		return 0, 0, false
+	if payload.Usage == nil {
+		return 0, 0, usageParseNoUsage
 	}
-	return payload.Usage.PromptTokens, payload.Usage.CompletionTokens, true
+	if payload.Usage.PromptTokens == nil && payload.Usage.CompletionTokens == nil {
+		return 0, 0, usageParseNoUsage
+	}
+
+	if payload.Usage.PromptTokens != nil {
+		promptTokens = *payload.Usage.PromptTokens
+	}
+	if payload.Usage.CompletionTokens != nil {
+		completionTokens = *payload.Usage.CompletionTokens
+	}
+	return promptTokens, completionTokens, usageParseFoundUsage
 }
 
 func (h *httpContext) parseSSEChunk(chunk []byte) {
@@ -389,13 +410,12 @@ func (h *httpContext) parseSSEChunk(chunk []byte) {
 		if bytes.Equal(data, []byte("[DONE]")) {
 			continue
 		}
-		prompt, completion, ok := parseUsageFromJSON(data)
-		if !ok {
-			// Not all SSE frames carry usage; treat parse errors only when JSON is invalid.
-			var tmp any
-			if err := json.Unmarshal(data, &tmp); err != nil {
-				h.streamParseErrors++
-			}
+		prompt, completion, status := parseUsageFromJSON(data)
+		switch status {
+		case usageParseInvalidJSON:
+			h.streamParseErrors++
+			continue
+		case usageParseNoUsage:
 			continue
 		}
 		h.promptTokens += prompt
