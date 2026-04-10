@@ -1,0 +1,38 @@
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  name: ai-gateway
+spec:
+  profile: empty # Do not install CRDs or the control plane
+  components:
+    ingressGateways:
+    - name: ai-gateway
+      namespace: ai-gateway-ns
+      enabled: true
+      label:
+        # Set a unique label for the gateway. This is required to ensure Gateways
+        # can select this workload
+        istio: ai-gateway
+      k8s:
+        imagePullPolicy: "IfNotPresent"
+        hpaSpec:
+          minReplicas: 1
+          maxReplicas: 1
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1Gi
+          requests:
+            cpu: 100m
+            memory: 100Mi
+        nodeSelector:
+          sfe/system-node: ai-gateway
+        tolerations:
+          key: sfe/system-node
+          operator: Equals
+          value: ai-gateway
+  values:
+    gateways:
+      istio-ingressgateway:
+        # Enable gateway injection
+        injectionTemplate: gateway
