@@ -1,12 +1,13 @@
 apiVersion: networking.istio.io/v1alpha3
 kind: EnvoyFilter
 metadata:
-  name: rate-limiter-wasm
+  name: rate-limiter
   namespace: istio-system
 spec:
   workloadSelector:
     labels:
       app: istio-ingressgateway
+      istio: ai-gateway
   configPatches:
     - applyTo: CLUSTER
       match:
@@ -53,17 +54,13 @@ spec:
                       uri: http://counter-service.default.svc.cluster.local:8080/wasm/rate-limiter.wasm
                       cluster: counter-service
                       timeout: 10s
-                    sha256: 21a4268d2c7f72a679dbbaad21b025cc0236219048594cf7791628302b33a4be
+                    sha256: 05eea1d48c3bf68f3a59c71943854b004412daa7fe1dfff8c12560d6e81fd683
               configuration:
                 "@type": type.googleapis.com/google.protobuf.StringValue
                 value: |
                   domains:
                     - llm-demo.local
                     - vllm-083.default.paic.com.cn
-                  token_statistics:
-                    enabled: true
-                    inject_stream_usage: true
-                    metric_key_limit: 5000
                   distributed_limit:
                     enabled: true
                     backend: counter_service

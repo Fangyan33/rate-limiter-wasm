@@ -1,0 +1,12 @@
+# Token Stats Plugin Configuration
+#
+# 该插件只负责 usage 统计与 stream usage 注入，不参与限流。
+
+domains:
+  - api.example.com
+  - "*.example.com"
+
+token_statistics:
+  enabled: true
+  inject_stream_usage: true
+  metric_key_limit: 5000

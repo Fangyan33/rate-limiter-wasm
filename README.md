@@ -1,539 +1,76 @@
-# rate-limiter 部署指南
+# rate-limiter-wasm
 
-本目录包含在 Istio 环境中部署 rate-limiter WASM 插件的配置示例。
+本仓库已按双插件架构拆分为三个 Go module：
 
-## 文件说明
+- `shared/`：共享的 Bearer 解析、JWT `uid` 提取、域名匹配
+- `rate-limiter/`：实际并发数限流插件与 `counter-service`
+- `token-stats/`：LLM token usage 统计插件
 
-- `deploy/istio/rate-limiter-envoyfilter.yaml` - Istio EnvoyFilter 配置，用于加载和配置 WASM 插件
-- `deploy/istio/rate-limiter-plugin-config.yaml` - 插件配置示例（独立配置文件）
-- `deploy/istio/counter-service-deployment.yaml` - Counter Service 部署配置（用于分布式限流）
-- `deploy/istio/istio-mesh-config-example.yaml` - Istio 1.13 mesh config 完整 ConfigMap 形态示例，用于说明如何在 `istio-system/istio` 中声明 token metrics 所需的原生 labels；应用前必须先与现网 mesh 配置合并
+## 目录
 
-
-
-## 部署模式
-
-### 分布式限流模式（Counter Service + Redis）
-
-使用异步 HTTP 调用与 Counter Service 通信，实现跨多个 Envoy 实例的分布式限流。限流配置存储在 Redis 中，支持动态更新，无需重启插件。
-
-配置示例：
-```yaml
-domains:
-  - api.example.com
-  - "*.example.com"  # 支持通配符域名
-distributed_limit:
-  enabled: true
-  backend: counter_service
-  counter_service:
-    cluster: counter-service
-    acquire_path: /acquire
-    release_path: /release
-    timeout_ms: 5000
-    lease_ttl_ms: 30000
-error_response:
-  status_code: 429
-  message: Rate limit exceeded
+```text
+rate-limiter-wasm/
+├── shared/
+├── rate-limiter/
+├── token-stats/
+├── deploy/istio/
+└── docs/specs/2026-04-10-wasm-plugin-split-spec.md
 ```
 
-**注意：** 分布式模式下，`rate_limits` 配置项已废弃。所有限流配置通过 Counter Service 的配置管理 API 动态管理，存储在 Redis 中。
+## 构建
 
-#### Counter Service 配置说明
-
-- `cluster`: Envoy 集群名称，指向 Counter Service
-- `acquire_path`: 获取限流槽位的 API 路径
-- `release_path`: 释放限流槽位的 API 路径
-- `timeout_ms`: HTTP 调用超时时间（毫秒）
-- `lease_ttl_ms`: 租约 TTL（毫秒），防止槽位泄漏
-
-#### Redis 配置存储架构
-
-限流配置按 `domain + api_key` 维度存储在 Redis Hash 中：
-
-**配置键格式：** `rl:config:{domain}:{api_key}`
-
-**配置字段：**
-- `max_concurrent`: 最大并发数
-- `enabled`: 是否启用（true/false）
-- `tier`: 可选，用户层级标识（如 basic, premium, enterprise）
-
-**通配符匹配优先级：**
-1. 精确匹配：`rl:config:api.example.com:key001`
-2. 父域名通配：`rl:config:*.example.com:key001`
-3. 全局通配：`rl:config:*:key001`
-
-#### 配置管理 API
-
-Counter Service 提供 RESTful API 用于管理限流配置：
-
-**创建/更新配置：**
-```bash
-curl -X PUT http://counter-service:8080/config \
-  -H "Content-Type: application/json" \
-  -d '{
-    "domain": "api.example.com",
-    "api_key": "key_basic_001",
-    "max_concurrent": 2,
-    "enabled": true,
-    "tier": "basic"
-  }'
-```
-
-**查询单个配置：**
-```bash
-curl "http://counter-service:8080/config?domain=api.example.com&api_key=key_basic_001"
-```
-
-**列出所有配置：**
-```bash
-curl "http://counter-service:8080/configs"
-```
-
-**删除配置：**
-```bash
-curl -X DELETE "http://counter-service:8080/config?domain=api.example.com&api_key=key_basic_001"
-```
-
-#### Counter Service API 契约
-
-**Acquire 请求：**
-```json
-POST /acquire
-Content-Type: application/json
-
-{
-  "domain": "api.example.com",
-  "api_key": "key_basic_001",
-  "ttl_ms": 30000
-}
-```
-
-**Acquire 响应（成功）：**
-```json
-HTTP/1.1 200 OK
-Content-Type: application/json
-
-{
-  "allowed": true,
-  "lease_id": "lease-uuid-123",
-  "max_concurrent": 2,
-  "current_count": 1,
-  "tier": "basic"
-}
-```
-
-**Acquire 响应（拒绝 - 超限）：**
-```json
-HTTP/1.1 200 OK
-Content-Type: application/json
-
-{
-  "allowed": false,
-  "reason": "limit_exceeded",
-  "max_concurrent": 2,
-  "current_count": 2
-}
-```
-
-**Acquire 响应（拒绝 - 配置未找到）：**
-```json
-HTTP/1.1 200 OK
-Content-Type: application/json
-
-{
-  "allowed": false,
-  "reason": "config_not_found"
-}
-```
-
-**Acquire 响应（拒绝 - Redis 不可用）：**
-```json
-HTTP/1.1 503 Service Unavailable
-Content-Type: application/json
-
-{
-  "allowed": false,
-  "reason": "redis_unavailable"
-}
-```
-
-**Release 请求：**
-```json
-POST /release
-Content-Type: application/json
-
-{
-  "lease_id": "lease-uuid-123"
-}
-```
-
-**Release 响应：**
-```json
-HTTP/1.1 200 OK
-Content-Type: application/json
-
-{
-  "released": true
-}
-```
-
-Release 响应会被插件忽略（best-effort 释放）。
-
-## 部署步骤
-
-### 前置条件
-
-1. Kubernetes 集群已安装 Istio
-2. 已构建 WASM 模块：`bash ./build.sh`
-3. 已构建 counter-service 镜像
-
-```
-docker build -t counter-service:latest -f Dockerfile.counter-service .
-```
-
-
-
-### 步骤 1：部署 Redis（分布式模式必需）
-
-如果使用分布式限流模式，需要先部署 Redis：
+构建两个 WASM：
 
 ```bash
-kubectl apply -f redis.yaml
+bash ./build.sh
 ```
 
-确保 Redis 正常运行：
-```bash
-kubectl get pods -l app=redis
-kubectl logs -l app=redis
-```
+产物输出到根目录 `dist/`：
 
-### 步骤 2：部署 Counter Service（分布式模式必需）
+- `dist/rate-limiter.wasm`
+- `dist/token-stats.wasm`
 
-部署 Counter Service：
+构建 `counter-service`：
 
 ```bash
-kubectl apply -f counter-service-deployment.yaml
+bash ./build-counter-service.sh
 ```
 
-确保 Counter Service 正常运行：
-```bash
-kubectl get pods -l app=counter-service
-kubectl logs -l app=counter-service
+默认输出：
 
-# 检查健康状态
-kubectl exec -it <counter-service-pod> -- curl http://localhost:8080/health
-```
+- `dist/counter-service`
 
-### 步骤 3：导入限流配置到 Redis
+## 测试
 
-#### 方法 1：使用迁移脚本（推荐）
-
-如果已有 YAML 格式的 `rate_limits` 配置，可使用迁移脚本自动导入：
+受工作区沙箱限制，运行 Go 测试时建议显式设置可写 `GOCACHE`：
 
 ```bash
-# 安装 yq（如果未安装）
-# macOS: brew install yq
-# Linux: wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq && chmod +x /usr/local/bin/yq
-
-# 执行迁移（使用默认配置文件）
-bash scripts/migrate-config-to-redis.sh
-
-# 或指定配置文件和 Counter Service URL
-bash scripts/migrate-config-to-redis.sh \
-  -f deploy/istio/rate-limiter-plugin-config.yaml \
-  -u http://counter-service:8080 \
-  -d "api.example.com"
+GOCACHE=/tmp/go-build go test ./shared/...
+GOCACHE=/tmp/go-build go test ./rate-limiter/internal/config ./rate-limiter/internal/limiter ./rate-limiter/internal/store ./rate-limiter/internal/plugin
+GOCACHE=/tmp/go-build go test ./token-stats/internal/config ./token-stats/internal/plugin
 ```
 
-#### 方法 2：手动导入配置
-
-使用 Counter Service 配置管理 API 手动导入：
+`counter-service` 相关测试依赖 `miniredis` 监听本地端口；在当前受限沙箱中会失败，需要在允许本地监听的环境执行：
 
 ```bash
-# 基础用户配置
-curl -X PUT http://<counter-service-ip>:8080/config \
-  -H "Content-Type: application/json" \
-  -d '{
-    "domain": "api.example.com",
-    "api_key": "key_basic_001",
-    "max_concurrent": 2,
-    "enabled": true,
-    "tier": "basic"
-  }'
-
-# 高级用户配置
-curl -X PUT http://<counter-service-ip>:8080/config \
-  -H "Content-Type: application/json" \
-  -d '{
-    "domain": "api.example.com",
-    "api_key": "key_premium_001",
-    "max_concurrent": 5,
-    "enabled": true,
-    "tier": "premium"
-  }'
-
-# 通配符域名配置（作为 fallback）
-curl -X PUT http://<counter-service-ip>:8080/config \
-  -H "Content-Type: application/json" \
-  -d '{
-    "domain": "*.example.com",
-    "api_key": "key_basic_001",
-    "max_concurrent": 3,
-    "enabled": true,
-    "tier": "basic"
-  }'
+GOCACHE=/tmp/go-build go test ./rate-limiter/internal/counter-service/...
 ```
 
-#### 验证配置
+## 部署
 
-```bash
-# 列出所有配置
-curl http://<counter-service-ip>:8080/configs
+双插件需独立部署为两个 EnvoyFilter：
 
-# 查询特定配置
-curl "http://<counter-service-ip>:8080/config?domain=api.example.com&api_key=key_basic_001"
-```
+- `deploy/istio/rate-limiter-envoyfilter.yaml`
+- `deploy/istio/token-stats-envoyfilter.yaml`
 
-### 步骤 4：更新 WASM 模块 SHA256
+对应独立配置：
 
-计算 WASM 模块的 SHA256：
-```bash
-sha256sum dist/rate-limiter.wasm
-```
+- `deploy/istio/rate-limiter-plugin-config.yaml`
+- `deploy/istio/token-stats-plugin-config.yaml`
 
-更新 `rate-limiter-envoyfilter.yaml` 中的 `sha256` 字段。
+注意事项：
 
-### 步骤 5：部署 EnvoyFilter
-
-```bash
-kubectl apply -f rate-limiter-envoyfilter.yaml
-```
-
-### 步骤 6：验证部署
-
-检查 Envoy 配置是否生效：
-```bash
-istioctl proxy-config listener <gateway-pod> -n istio-system
-```
-
-发送测试请求：
-```bash
-curl -H "Host: api.example.com" \
-     -H "Authorization: Bearer key_basic_001" \
-     http://<gateway-ip>/test
-```
-
-## 动态配置管理
-
-分布式模式下，限流配置存储在 Redis 中，可通过 Counter Service API 实时修改，无需重启插件。
-
-### 修改配置
-
-```bash
-# 调整并发限制
-curl -X PUT http://<counter-service-ip>:8080/config \
-  -H "Content-Type: application/json" \
-  -d '{
-    "domain": "api.example.com",
-    "api_key": "key_basic_001",
-    "max_concurrent": 10,
-    "enabled": true,
-    "tier": "basic"
-  }'
-```
-
-配置变更立即生效，下一个请求将使用新的限制值。
-
-### 禁用/启用 API Key
-
-```bash
-# 禁用某个 API Key
-curl -X PUT http://<counter-service-ip>:8080/config \
-  -H "Content-Type: application/json" \
-  -d '{
-    "domain": "api.example.com",
-    "api_key": "key_basic_001",
-    "max_concurrent": 2,
-    "enabled": false
-  }'
-```
-
-禁用后，`POST /acquire` 会返回 `HTTP 200 + allowed=false + reason=api_key_disabled`；网关侧请求会按插件 `error_response` 被拒绝（默认 429）。
-
-### 删除配置
-
-```bash
-curl -X DELETE "http://<counter-service-ip>:8080/config?domain=api.example.com&api_key=key_basic_001"
-```
-
-### 批量导入配置
-
-可以编写脚本批量导入配置：
-
-```bash
-#!/bin/bash
-# import-configs.sh
-
-COUNTER_SERVICE="http://counter-service:8080"
-
-# 从 JSON 文件读取配置
-cat configs.json | jq -c '.[]' | while read config; do
-  curl -X PUT "$COUNTER_SERVICE/config" \
-    -H "Content-Type: application/json" \
-    -d "$config"
-  echo "Imported: $config"
-done
-```
-
-configs.json 示例：
-```json
-[
-  {
-    "domain": "api.example.com",
-    "api_key": "key001",
-    "max_concurrent": 5,
-    "enabled": true,
-    "tier": "premium"
-  },
-  {
-    "domain": "*.example.com",
-    "api_key": "key002",
-    "max_concurrent": 2,
-    "enabled": true,
-    "tier": "basic"
-  }
-]
-```
-
-## 降级行为
-
-当 Counter Service 或 Redis 不可用时，插件会**关闭限流模式**
-
-## 配置调优
-
-### Timeout 设置
-
-- `timeout_ms`: 建议设置为 1000-5000ms
-  - 太短：容易触发降级
-  - 太长：影响请求延迟
-
-### Lease TTL 设置
-
-- `lease_ttl_ms`: 建议设置为 30000-60000ms（30-60秒）
-  - 太短：频繁续约，增加 Counter Service 负载
-  - 太长：异常情况下槽位泄漏时间长
-
-### Counter Service 副本数
-
-根据流量规模调整 Counter Service 副本数：
-- 低流量（< 1000 RPS）：2 副本
-- 中流量（1000-10000 RPS）：3-5 副本
-- 高流量（> 10000 RPS）：5+ 副本 + 水平扩展
-
-## 故障排查
-
-### 插件未生效
-
-1. 检查 EnvoyFilter 是否应用成功：
-   ```bash
-   kubectl get envoyfilter -n istio-system
-   ```
-
-2. 检查 WASM 模块是否加载：
-   ```bash
-   kubectl logs <gateway-pod> -n istio-system | grep -i wasm
-   ```
-
-### 限流不工作
-
-1. 检查域名匹配：
-   ```bash
-   # 确保请求的 Host 头匹配配置中的 domains
-   curl -v -H "Host: api.example.com" ...
-   ```
-
-2. 检查 API Key：
-   ```bash
-   # 确保 Authorization 头格式正确
-   curl -v -H "Authorization: Bearer key_basic_001" ...
-   ```
-
-3. 查看插件日志：
-   ```bash
-   kubectl logs <gateway-pod> -n istio-system | grep -i "rate"
-   ```
-
-### Counter Service 连接失败
-
-1. 检查 Counter Service 是否运行：
-   ```bash
-   kubectl get pods -l app=counter-service
-   ```
-
-2. 检查网络连通性：
-   ```bash
-   kubectl exec <gateway-pod> -n istio-system -- \
-     curl -v http://counter-service.default.svc.cluster.local:8080/health
-   ```
-
-3. 检查 Envoy 集群配置：
-   ```bash
-   istioctl proxy-config cluster <gateway-pod> -n istio-system | grep ratelimit
-   ```
-
-## 监控指标
-
-### Istio 1.13 token metrics
-
-目前，本wasm在 istio-ingressgateway 中暴漏如下指标：
-
-```
-llm_prompt_tokens_total{domain="llm-svc.domain", uid="sfe-platform"}
-llm_completion_tokens_total{domain="llm-svc.domain", uid="sfe-platform"}
-llm_stream_parse_errors_total{domain="llm-svc.domain", uid="sfe-platform"}
-```
-
-### Istio 1.13 token metrics 标签说明
-
-对于 Istio 1.13.5，只有部署 `rate-limiter-envoyfilter.yaml` 还不足以让 Prometheus 中的 token metrics 自动带上 `domain` 和 `uid` labels。这个版本需要在 mesh config 中通过 `defaultConfig.extraStatTags` 显式声明这两个 tag，Envoy 才会把插件输出的统计维度作为原生 label 暴露出来。
-
-当前推荐做法如下：
-
-1. 部署本目录的 EnvoyFilter，使 WASM 插件产生对应统计维度。
-2. 同时在 Istio mesh config 中声明 `defaultConfig.extraStatTags: [domain, uid]`。
-3. 可参考新增的 `istio-mesh-config-example.yaml`，它提供了适用于 Istio 1.13 的完整 `ConfigMap` 形态示例，便于把 `defaultConfig.extraStatTags` 合并进现有 mesh 配置。
-
-需要特别说明：
-
-- 自定义 EnvoyFilter BOOTSTRAP regex 不是 Istio 1.13.5 获取这些 labels 的支持路径。
-- Prometheus 中的 metric name 不需要改名；完成 mesh config 声明后，原有 metric 会直接带出 `domain` 和 `uid` labels。
-- 旧的 `stats_config`、`stats_tags` 或基于 `__host0domain__`、`__user0id__` 的方案仅可作为历史背景说明，不应视为当前部署指令。
-
-### Istio 1.13 mesh config 示例
-
-active guidance 应聚焦在更新现网 `istio-system/istio` 的 `data.mesh`：将 `defaultConfig.extraStatTags` 中的 `domain`、`uid` 合并进当前 mesh 配置，而不是把示例文件当作现成部署清单直接 apply。
-
-推荐流程：
-
-1. 先导出并审阅当前集群中的 `istio-system/istio` ConfigMap。
-2. 在现有 `data.mesh` 中补充：
-   ```yaml
-   defaultConfig:
-     extraStatTags:
-       - domain
-       - uid
-   ```
-3. 确认没有覆盖掉现网已有的 mesh 配置项后，再把合并后的结果回写到集群。
-4. `deploy/istio/istio-mesh-config-example.yaml` 仅作为完整 `ConfigMap` 形态参考，用来帮助定位 `data.mesh` 的写法，不是当前推荐的直接 apply 主路径。
-
-需要特别说明：
-
-- `istio-mesh-config-example.yaml` 中的 `accessLogFile`、`enablePrometheusMerge`、`trustDomain` 等字段只是为了展示一个更完整的 `ConfigMap` 形态；它们不是 token metrics labels 的最小必需项。
-- 对当前需求，关键依赖仍然只有把 `defaultConfig.extraStatTags` 中的 `domain`、`uid` 合并进现网 mesh 配置。
-- 自定义 EnvoyFilter BOOTSTRAP regex 仅作为历史说明，不是当前部署指令。
-
-也就是说：EnvoyFilter-only 仍然不够，`extraStatTags` 仍然是当前方案的显式依赖；而完整示例文件的作用是“参考合并形态”，不是“直接覆盖 apply”。
-
-### 历史方案说明（非当前方案）
-
-历史排查中可能会见到通过 `stats_config`、`stats_tags` 或自定义 BOOTSTRAP regex 注入标签的做法。这些路径在当前目标版本中不作为正式支持方案，本目录新增的 mesh config example 才是当前依赖项示例。
+- 两个插件都维护自己的 `domains`，运维侧必须保持一致。
+- `rate-limiter` 继续依赖 `counter-service` 做分布式 acquire/release。
+- `token-stats` 不依赖 `counter-service`，示例里使用独立的 `wasm-artifact-server` 拉取 `token-stats.wasm`。
+- 部署前需要把 YAML 中的 `sha256` 替换为实际构建产物摘要。

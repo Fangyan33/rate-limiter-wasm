@@ -6,6 +6,6 @@ OUTPUT=${1:-dist/counter-service}
 mkdir -p "$(dirname "$OUTPUT")"
 
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-  go build -buildvcs=false -o "$OUTPUT" ./cmd/counter-service
+  go build -buildvcs=false -o "$OUTPUT" ./rate-limiter/cmd/counter-service
 
 echo "built $OUTPUT"

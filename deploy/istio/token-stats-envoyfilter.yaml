@@ -1,0 +1,49 @@
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: token-stats
+  namespace: istio-system
+spec:
+  workloadSelector:
+    labels:
+      app: istio-ingressgateway
+      istio: ai-gateway
+  configPatches:
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+              subFilter:
+                name: envoy.filters.http.router
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: envoy.filters.http.wasm
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
+            config:
+              name: token-stats
+              root_id: token-stats-root
+              vm_config:
+                vm_id: token-stats-vm
+                runtime: envoy.wasm.runtime.v8
+                code:
+                  remote:
+                    http_uri:
+                      uri: http://counter-service.default.svc.cluster.local:8080/wasm/token-stats.wasm
+                      cluster: counter-service
+                      timeout: 10s
+                    sha256: e559101e76aa5419804ab15086dd494b8f70739c4d1931a263ba73df8c7c8691
+              configuration:
+                "@type": type.googleapis.com/google.protobuf.StringValue
+                value: |
+                  domains:
+                    - llm-demo.local
+                    - vllm-083.default.paic.com.cn
+                  token_statistics:
+                    enabled: true
+                    inject_stream_usage: true
+                    metric_key_limit: 5000
