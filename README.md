@@ -67,9 +67,9 @@ error_response:
 
 #### Redis 配置存储架构
 
-限流配置按 `domain + api_key` 维度存储在 Redis Hash 中：
+限流配置在 Redis 中按 `domain + sha256(api_key)` 维度存储为 Hash。Counter Service 对外接口仍然接收明文 `api_key`，但 Redis 内部不会保存明文 key。
 
-**配置键格式：** `rl:config:{domain}:{api_key}`
+**配置键格式：** `rl:config:{domain}:{api_key_sha256}`
 
 **配置字段：**
 
@@ -79,9 +79,9 @@ error_response:
 
 **通配符匹配优先级：**
 
-1. 精确匹配：`rl:config:api.example.com:key001`
-2. 父域名通配：`rl:config:*.example.com:key001`
-3. 全局通配：`rl:config:*:key001`
+1. 精确匹配：`rl:config:api.example.com:<sha256(key001)>`
+2. 父域名通配：`rl:config:*.example.com:<sha256(key001)>`
+3. 全局通配：`rl:config:*:<sha256(key001)>`
 
 #### 配置管理 API
 
@@ -107,11 +107,15 @@ curl -X PUT http://counter-service:8080/config \
 curl "http://counter-service:8080/config?domain=api.example.com&api_key=key_basic_001"
 ```
 
+返回结果会包含请求中的明文 `api_key`，以及对应的 `api_key_hash`。
+
 **列出所有配置：**
 
 ```bash
 curl "http://counter-service:8080/configs"
 ```
+
+`/configs` 列表不会返回明文 `api_key`，只返回 `api_key_hash`。
 
 **删除配置：**
 
@@ -209,7 +213,31 @@ Content-Type: application/json
 }
 ```
 
-Release 响应会被插件忽略（best-effort 释放）。
+**Release 响应（租约不存在）：**
+
+```json
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{
+  "released": false,
+  "reason": "lease_not_found"
+}
+```
+
+**Release 响应（Redis 不可用）：**
+
+```json
+HTTP/1.1 503 Service Unavailable
+Content-Type: application/json
+
+{
+  "released": false,
+  "reason": "redis unavailable"
+}
+```
+
+Release 响应会被插件忽略（best-effort 释放）；插件只尝试发送 release，不依赖响应体继续处理请求。
 
 ### 部署步骤
 
@@ -325,6 +353,11 @@ curl http://<counter-service-ip>:8080/configs
 # 查询特定配置
 curl "http://<counter-service-ip>:8080/config?domain=api.example.com&api_key=key_basic_001"
 ```
+
+注意：
+
+- `/config` 单项查询返回 `api_key` 和 `api_key_hash`
+- `/configs` 列表只返回 `api_key_hash`，不会回显明文 `api_key`
 
 #### 步骤 4：更新 WASM 模块 SHA256
 
@@ -443,7 +476,9 @@ done
 
 ### 降级行为
 
-当 Counter Service 或 Redis 不可用时，插件会**关闭限流模式**。
+当 Counter Service 调用失败、超时、返回非 `200`，或返回体无法解析时，插件当前行为是 **fail-open 放行当前请求**，不会切回本地限流。
+
+当 Counter Service 返回 `HTTP 200` 且 `allowed=false` 时，插件会按 `error_response` 配置直接拒绝请求。
 
 ### 配置调优
 
