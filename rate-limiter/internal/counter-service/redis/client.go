@@ -2,7 +2,9 @@ package redis
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -100,6 +102,11 @@ func (c *Client) Close() error {
 // Key 返回带前缀的完整 key
 func (c *Client) Key(subKey string) string {
 	return c.prefix + subKey
+}
+
+func hashAPIKey(apiKey string) string {
+	sum := sha256.Sum256([]byte(apiKey))
+	return hex.EncodeToString(sum[:])
 }
 
 // Rdb 暴露底层 redis.Client（供 Lua 脚本、HSET 等直接使用）

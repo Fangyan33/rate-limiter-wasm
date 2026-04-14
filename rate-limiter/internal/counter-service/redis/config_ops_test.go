@@ -2,6 +2,8 @@ package redis_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
@@ -27,8 +29,13 @@ func setupConfigTest(t *testing.T) (*miniredis.Miniredis, *redis.Client) {
 	return s, client
 }
 
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
 func TestSetGetConfig(t *testing.T) {
-	_, client := setupConfigTest(t)
+	s, client := setupConfigTest(t)
 
 	cfg := models.RateLimitConfig{
 		Domain:        "api.example.com",
@@ -42,6 +49,8 @@ func TestSetGetConfig(t *testing.T) {
 	// Set
 	err := client.SetConfig(context.Background(), cfg)
 	assert.NoError(t, err)
+	assert.True(t, s.Exists("rl:config:api.example.com:"+sha256Hex(cfg.APIKey)))
+	assert.False(t, s.Exists("rl:config:api.example.com:"+cfg.APIKey))
 
 	// Get
 	got, err := client.GetConfig(context.Background(), cfg.Domain, cfg.APIKey)
@@ -50,6 +59,7 @@ func TestSetGetConfig(t *testing.T) {
 
 	assert.Equal(t, cfg.Domain, got.Domain)
 	assert.Equal(t, cfg.APIKey, got.APIKey)
+	assert.Equal(t, sha256Hex(cfg.APIKey), got.APIKeyHash)
 	assert.Equal(t, cfg.MaxConcurrent, got.MaxConcurrent)
 	assert.Equal(t, cfg.Enabled, got.Enabled)
 	assert.Equal(t, cfg.Tier, got.Tier)
@@ -58,7 +68,7 @@ func TestSetGetConfig(t *testing.T) {
 }
 
 func TestDeleteConfig(t *testing.T) {
-	_, client := setupConfigTest(t)
+	s, client := setupConfigTest(t)
 
 	cfg := models.RateLimitConfig{
 		Domain:        "api.example.com",
@@ -71,6 +81,7 @@ func TestDeleteConfig(t *testing.T) {
 
 	err := client.DeleteConfig(context.Background(), cfg.Domain, cfg.APIKey)
 	assert.NoError(t, err)
+	assert.False(t, s.Exists("rl:config:api.example.com:"+sha256Hex(cfg.APIKey)))
 
 	got, err := client.GetConfig(context.Background(), cfg.Domain, cfg.APIKey)
 	assert.NoError(t, err)
@@ -98,7 +109,10 @@ func TestListConfigs(t *testing.T) {
 	// 验证内容
 	found := 0
 	for _, c := range result.Configs {
-		if c.APIKey == "k1" || c.APIKey == "k2" || c.APIKey == "k3" {
+		if c.APIKey != "" {
+			t.Fatalf("expected list configs to omit plaintext api_key, got %+v", c)
+		}
+		if c.APIKeyHash == sha256Hex("k1") || c.APIKeyHash == sha256Hex("k2") || c.APIKeyHash == sha256Hex("k3") {
 			found++
 		}
 	}

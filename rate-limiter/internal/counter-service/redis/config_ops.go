@@ -27,7 +27,7 @@ func (c *Client) SetConfig(ctx context.Context, cfg models.RateLimitConfig) erro
 		return err
 	}
 
-	key := c.Key(fmt.Sprintf("config:%s:%s", cfg.Domain, cfg.APIKey))
+	key := c.Key(fmt.Sprintf("config:%s:%s", cfg.Domain, hashAPIKey(cfg.APIKey)))
 
 	fields := map[string]interface{}{
 		"max_concurrent": cfg.MaxConcurrent,
@@ -47,7 +47,7 @@ func (c *Client) SetConfig(ctx context.Context, cfg models.RateLimitConfig) erro
 
 // GetConfig 获取单个配置
 func (c *Client) GetConfig(ctx context.Context, domain, apiKey string) (*models.RateLimitConfig, error) {
-	key := c.Key(fmt.Sprintf("config:%s:%s", domain, apiKey))
+	key := c.Key(fmt.Sprintf("config:%s:%s", domain, hashAPIKey(apiKey)))
 
 	result, err := c.rdb.HGetAll(ctx, key).Result()
 	if err != nil {
@@ -64,6 +64,7 @@ func (c *Client) GetConfig(ctx context.Context, domain, apiKey string) (*models.
 	return &models.RateLimitConfig{
 		Domain:        domain,
 		APIKey:        apiKey,
+		APIKeyHash:    hashAPIKey(apiKey),
 		MaxConcurrent: maxConcurrent,
 		Enabled:       enabled,
 		Tier:          result["tier"],
@@ -74,7 +75,7 @@ func (c *Client) GetConfig(ctx context.Context, domain, apiKey string) (*models.
 
 // DeleteConfig 删除指定配置
 func (c *Client) DeleteConfig(ctx context.Context, domain, apiKey string) error {
-	key := c.Key(fmt.Sprintf("config:%s:%s", domain, apiKey))
+	key := c.Key(fmt.Sprintf("config:%s:%s", domain, hashAPIKey(apiKey)))
 	return c.rdb.Del(ctx, key).Err()
 }
 
@@ -110,7 +111,7 @@ func (c *Client) ListConfigs(ctx context.Context, pattern string, cursor uint64,
 	configs := make([]models.RateLimitConfig, 0, len(raw.Configs))
 	for _, item := range raw.Configs {
 		key := item["key"]
-		// 解析 key 为 domain:api_key
+		// 解析 key 为 domain:api_key_hash
 		parts := strings.SplitN(strings.TrimPrefix(key, c.prefix+"config:"), ":", 2)
 		if len(parts) != 2 {
 			continue // 跳过非法 key
@@ -122,7 +123,7 @@ func (c *Client) ListConfigs(ctx context.Context, pattern string, cursor uint64,
 
 		configs = append(configs, models.RateLimitConfig{
 			Domain:        parts[0],
-			APIKey:        parts[1],
+			APIKeyHash:    parts[1],
 			MaxConcurrent: maxConcurrent,
 			Enabled:       enabled,
 			Tier:          item["tier"],

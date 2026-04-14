@@ -36,6 +36,7 @@ type ReleaseResult struct {
 type RateLimitConfig struct {
 	Domain        string `json:"domain"`
 	APIKey        string `json:"api_key"`
+	APIKeyHash    string `json:"api_key_hash,omitempty"`
 	MaxConcurrent int    `json:"max_concurrent"`
 	Enabled       bool   `json:"enabled"`
 	Tier          string `json:"tier,omitempty"`

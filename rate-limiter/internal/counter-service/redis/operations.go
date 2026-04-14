@@ -43,16 +43,17 @@ var (
 // Acquire 执行原子获取并发槽位（调用 Lua acquire_with_config）
 func (c *Client) Acquire(ctx context.Context, req models.AcquireRequest) (*AcquireResult, error) {
 	leaseID := uuid.New().String()
+	apiKeyHash := hashAPIKey(req.APIKey)
 
-	configKey := c.Key(fmt.Sprintf("config:%s:%s", req.Domain, req.APIKey))
-	leasesKey := c.Key(fmt.Sprintf("leases:%s:%s", req.Domain, req.APIKey))
+	configKey := c.Key(fmt.Sprintf("config:%s:%s", req.Domain, apiKeyHash))
+	leasesKey := c.Key(fmt.Sprintf("leases:%s:%s", req.Domain, apiKeyHash))
 	leaseKey := c.Key(fmt.Sprintf("lease:%s", leaseID))
 
 	wildcardConfigKey := ""
 	if parts := strings.SplitN(req.Domain, ".", 2); len(parts) == 2 {
-		wildcardConfigKey = c.Key(fmt.Sprintf("config:*.%s:%s", parts[1], req.APIKey))
+		wildcardConfigKey = c.Key(fmt.Sprintf("config:*.%s:%s", parts[1], apiKeyHash))
 	}
-	globalConfigKey := c.Key(fmt.Sprintf("config:*:%s", req.APIKey))
+	globalConfigKey := c.Key(fmt.Sprintf("config:*:%s", apiKeyHash))
 
 	keys := []string{configKey, leasesKey, leaseKey}
 	if wildcardConfigKey != "" {
