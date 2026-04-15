@@ -1,0 +1,31 @@
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: vllm-mock
+  namespace: default
+spec:
+  selector:
+    istio: ai-gateway
+  servers:
+  - hosts:
+    - vllm-mock.default.paic.com.cn
+    port:
+      name: http
+      number: 80
+      protocol: HTTP
+
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: vllm-mock
+  namespace: default
+spec:
+  gateways:
+  - vllm-mock
+  hosts:
+  - vllm-mock.default.paic.com.cn
+  http:
+  - route:
+    - destination:
+        host: vllm-mock

@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-mock
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-mock
+  template:
+    metadata:
+      labels:
+        app: vllm-mock
+    spec:
+      containers:
+      - name: nginx
+        image: aibrix/vllm-mock:nightly
+        ports:
+        - containerPort: 80
