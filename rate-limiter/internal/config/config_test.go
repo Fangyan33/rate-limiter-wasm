@@ -101,8 +101,32 @@ distributed_limit:
 	if cfg.DistributedLimit.CounterService.ReleasePath != "/release" {
 		t.Fatalf("expected default release_path=/release, got %q", cfg.DistributedLimit.CounterService.ReleasePath)
 	}
+	if cfg.DistributedLimit.CounterService.RenewPath != "/renew" {
+		t.Fatalf("expected default renew_path=/renew, got %q", cfg.DistributedLimit.CounterService.RenewPath)
+	}
 	if cfg.DistributedLimit.CounterService.LeaseTTLMS != 30000 {
 		t.Fatalf("expected default lease_ttl_ms=30000, got %d", cfg.DistributedLimit.CounterService.LeaseTTLMS)
+	}
+}
+
+func TestParseRenewPath(t *testing.T) {
+	for _, path := range []string{"/leases/renew", "renew"} {
+		t.Run(path, func(t *testing.T) {
+			cfg, err := config.Parse([]byte(`domains: [api.example.com]
+distributed_limit:
+  enabled: true
+  backend: counter_service
+  counter_service:
+    cluster: counter-service
+    renew_path: ` + path + "\n"))
+			if path == "renew" {
+				if err == nil {
+					t.Fatal("expected relative renew_path to be rejected")
+				}
+			} else if err != nil || cfg.DistributedLimit.CounterService.RenewPath != path {
+				t.Fatalf("custom renew_path not preserved: cfg=%+v err=%v", cfg, err)
+			}
+		})
 	}
 }
 

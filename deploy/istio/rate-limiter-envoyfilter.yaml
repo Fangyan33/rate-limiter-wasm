@@ -54,7 +54,7 @@ spec:
                       uri: http://counter-service.default.svc.cluster.local:8080/wasm/rate-limiter.wasm
                       cluster: counter-service
                       timeout: 10s
-                    sha256: 05eea1d48c3bf68f3a59c71943854b004412daa7fe1dfff8c12560d6e81fd683
+                    sha256: 3765abc5a77a22815ac7de997741c6e1c3dcae28851743b8d820c1563870c1e1
               configuration:
                 "@type": type.googleapis.com/google.protobuf.StringValue
                 value: |
@@ -68,6 +68,7 @@ spec:
                       cluster: counter-service
                       acquire_path: /acquire
                       release_path: /release
+                      renew_path: /renew
                       timeout_ms: 5000
                       lease_ttl_ms: 30000
                   error_response:

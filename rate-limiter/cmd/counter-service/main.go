@@ -43,6 +43,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/acquire", acquireHandler)
 	mux.Handle("/release", releaseHandler)
+	mux.Handle("/renew", handler.NewRenewHandler(client))
 	mux.Handle("/config", configHandler)
 	mux.Handle("/configs", configHandler)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

@@ -32,6 +32,28 @@ type ReleaseResult struct {
 	CurrentCount int    `json:"current_count,omitempty"`
 }
 
+// RenewRequest extends an existing lease without acquiring another slot.
+type RenewRequest struct {
+	LeaseID string `json:"lease_id"`
+	TTLMS   int64  `json:"ttl_ms"`
+}
+
+func (r *RenewRequest) Validate() error {
+	if r.LeaseID == "" {
+		return ErrEmptyLeaseID
+	}
+	if r.TTLMS <= 0 {
+		return ErrInvalidTTL
+	}
+	return nil
+}
+
+type RenewResult struct {
+	Renewed bool   `json:"renewed"`
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
 // RateLimitConfig 限流配置（用于配置管理 API）
 type RateLimitConfig struct {
 	Domain        string `json:"domain"`

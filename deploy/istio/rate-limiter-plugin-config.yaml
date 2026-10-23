@@ -16,7 +16,7 @@ domains:
 
 # rate_limits 配置项已废弃（分布式模式下）
 # 所有限流配置通过 Counter Service API 管理，存储在 Redis:
-#   - 配置键格式: rl:config:{domain}:{api_key}
+#   - 配置键格式: rl:config:{domain}:{sha256(api_key)}
 #   - 通配符匹配: 精确 > *.parent > *
 #   - 配置字段: max_concurrent, enabled, tier
 #
@@ -36,6 +36,7 @@ distributed_limit:
     cluster: counter-service
     acquire_path: /acquire
     release_path: /release
+    renew_path: /renew
     timeout_ms: 5000
     lease_ttl_ms: 30000
 

@@ -7,14 +7,13 @@ import (
 // Lua 脚本内容（直接来自设计文档，稍作格式整理）
 const (
 	acquireScript = `-- acquire_with_config.lua (ZSET model)
--- KEYS[1]: config_key        (rl:config:<domain>:<api_key>)
--- KEYS[2]: leases_key        (rl:leases:<domain>:<api_key>)
+-- KEYS[1]: config_key        (rl:config:<domain>:<api_key_sha256>)
+-- KEYS[2]: leases_key        (rl:leases:<domain>:<api_key_sha256>)
 -- KEYS[3]: lease_key         (rl:lease:<lease_id>)
 -- KEYS[4]: wildcard_config_key
 -- KEYS[5]: global_config_key
 -- ARGV[1]: lease_ttl_ms
--- ARGV[2]: now_ms
--- ARGV[3]: lease_id
+-- ARGV[2]: lease_id
 
 local function get_config(key)
     if not key or key == "" then
@@ -53,7 +52,8 @@ if not max_concurrent or max_concurrent <= 0 then
 end
 
 local leases_key = KEYS[2]
-local now_ms = tonumber(ARGV[2])
+local redis_time = redis.call('TIME')
+local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
 redis.call('ZREMRANGEBYSCORE', leases_key, '-inf', now_ms)
 
 local current = redis.call('ZCARD', leases_key)
@@ -62,7 +62,7 @@ if current >= max_concurrent then
 end
 
 local lease_ttl_ms = tonumber(ARGV[1])
-local lease_id = ARGV[3]
+local lease_id = ARGV[2]
 local expire_at = now_ms + lease_ttl_ms
 redis.call('ZADD', leases_key, expire_at, lease_id)
 redis.call('SET', KEYS[3], leases_key, 'PX', lease_ttl_ms)
@@ -91,6 +91,32 @@ redis.call('ZREM', leases_key, ARGV[1])
 local current = redis.call('ZCARD', leases_key)
 
 return cjson.encode({released = true, current_count = current})
+`
+
+	renewScript = `-- renew_with_lease.lua (ZSET model)
+-- KEYS[1]: lease_key (rl:lease:<lease_id>)
+-- ARGV[1]: lease_id
+-- ARGV[2]: lease_ttl_ms
+
+local leases_key = redis.call('GET', KEYS[1])
+if not leases_key then
+    return cjson.encode({renewed = false, reason = "lease_not_found"})
+end
+
+local redis_time = redis.call('TIME')
+local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
+local score = redis.call('ZSCORE', leases_key, ARGV[1])
+if not score or tonumber(score) <= now_ms then
+    redis.call('DEL', KEYS[1])
+    redis.call('ZREM', leases_key, ARGV[1])
+    return cjson.encode({renewed = false, reason = "lease_not_found"})
+end
+
+-- A repeated renew must never shorten a lease that was already extended.
+local expire_at = math.max(tonumber(score), now_ms + tonumber(ARGV[2]))
+redis.call('ZADD', leases_key, 'XX', expire_at, ARGV[1])
+redis.call('PEXPIRE', KEYS[1], expire_at - now_ms)
+return cjson.encode({renewed = true})
 `
 
 	listConfigsScript = `-- list_configs.lua
@@ -128,6 +154,10 @@ func GetAcquireScript() string {
 
 func GetReleaseScript() string {
 	return strings.TrimSpace(releaseScript)
+}
+
+func GetRenewScript() string {
+	return strings.TrimSpace(renewScript)
 }
 
 func GetListConfigsScript() string {

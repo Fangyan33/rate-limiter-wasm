@@ -1,5 +1,9 @@
 # Istio Envoy WebAssembly 并发限流插件需求文档
 
+> 状态：历史需求与设计记录，保留原始需求用于追溯，不作为当前已交付能力清单。当前部署与配置以 [README](../../README.md) 为准，双插件职责边界见 [拆分规范](2026-04-10-wasm-plugin-split-spec.md)。
+>
+> 当前实现已拆分为 `rate-limiter` 和 `token-stats`。分布式限流通过 Counter Service + Redis，配置使用 `backend: counter_service`；Token 指标按 `domain/uid` 聚合。下文的 Redis 直连配置、按 API Key/model 聚合、限流指标和本地计数热更新要求应结合各节状态说明阅读。
+
 ## 1. 项目概述
 
 ### 1.1 项目目标
@@ -47,6 +51,8 @@
 
 #### 2.1.5 LLM Token 用量统计
 
+> 实现状态：由独立 `token-stats` 插件承担；当前按请求域名和 JWT `uid` 统计，不提供本文要求的 API Key/model 维度。缺失或无效 `uid` 时，同时跳过统计与 usage 注入。
+
 功能目标：精确统计每个 API Key 消耗的输入和输出 Token 数量，用于计费、配额管理及可观测性展示。
 
 适用范围：仅对命中 `domains` 配置的请求启用 Token 统计；未命中域名的请求完全 bypass，不参与任何 Token 统计逻辑。
@@ -71,6 +77,8 @@
 ### 2.2 配置管理
 
 #### 2.2.1 插件配置项
+
+> 历史配置：以下单插件、Redis 直连示例已被双插件配置替代。`backend: redis` 当前会被拒绝，`fallback_to_local`、`key_prefix`、`redis` 也不是当前插件配置字段。可用示例见 README。
 ```yaml
 # 示例配置结构
 domains:
@@ -119,6 +127,8 @@ token_statistics:
 - 首版必须提供可运行的 Redis 后端配置与部署示例，后续其他后端应复用统一配置抽象
 
 ### 2.3 配置热更新
+
+> 实现状态：分布式阈值通过 Counter Service API 写入 Redis，新 acquire 读取新配置；现有租约使用获取时的服务配置续约和释放。下文要求的本地 limiter 在途计数保留与阈值平滑切换尚未实现，不能据此推定本地模式具备无损热更新能力。
 
 #### 2.3.1 需求描述
 - 修改配置后无需重启 Envoy 实例即可生效
@@ -183,6 +193,8 @@ Rate limit exceeded for API key
 - 分布式共享计数存储异常时，插件必须采用 fail-open 策略放行请求，并在后端恢复后自动回到正常分布式限流判定
 
 ### 3.3 可观测性
+
+> 实现状态：下列限流并发数、拒绝数、延迟及 `distributed_limit_*` 指标尚未实现；Token 指标已实现，但标签为 `domain/uid`，没有 `api_key/model`。
 - 记录关键操作日志
 - 暴露限流指标（Prometheus 格式）：
   - 每个 API Key 的当前并发数
@@ -215,6 +227,8 @@ Rate limit exceeded for API key
 - 需处理异常断开场景，确保计数器不会泄漏
 
 ### 4.2 配置热更新实现
+
+> 未完成要求：当前本地模式重新加载配置时创建新的 limiter，不保留旧 limiter 的在途计数。以下算法是历史设计目标，不是当前实现说明。
 - 配置存储为可原子替换的引用
 - OnPluginStart 接收新配置时：
   1. 解析并校验新配置

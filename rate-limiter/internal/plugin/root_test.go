@@ -163,7 +163,7 @@ func TestPluginReleasesSlotOnStreamDone(t *testing.T) {
 	}
 }
 
-func TestPluginFallsBackToLocalLimitWhenCounterServiceUnavailable(t *testing.T) {
+func TestPluginWaitsForCounterServiceWithoutApplyingLocalLimit(t *testing.T) {
 	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
   - api.example.com
 rate_limits:
@@ -183,10 +183,8 @@ error_response:
 `))
 	defer reset()
 
-	// With the async distributed path enabled, requests pause while
-	// the counter-service acquire decision is pending. The synchronous
-	// fallback to local limiting will be exercised by the callback
-	// handler in a later task; for now, verify the pause behavior.
+	// The distributed path waits for the remote decision and does not use
+	// the configured local limit as a fallback.
 	firstID := host.InitializeHttpContext()
 	firstAction := host.CallOnRequestHeaders(firstID, [][2]string{
 		{":authority", "api.example.com"},

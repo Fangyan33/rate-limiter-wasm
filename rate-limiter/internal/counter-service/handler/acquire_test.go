@@ -2,6 +2,9 @@ package handler
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +12,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"rate-limiter-wasm/rate-limiter/internal/counter-service/models"
 	"rate-limiter-wasm/rate-limiter/internal/counter-service/redis"
 )
 
@@ -23,17 +27,31 @@ func setupTestHandler(t *testing.T) (*AcquireHandler, *ReleaseHandler, *miniredi
 	if err != nil {
 		t.Fatalf("failed to create redis client: %v", err)
 	}
+	t.Cleanup(func() { client.Close() })
 
 	acquireHandler := NewAcquireHandler(client)
 	releaseHandler := NewReleaseHandler(client)
 	return acquireHandler, releaseHandler, mr
 }
 
-func TestAcquireHandler_Success(t *testing.T) {
-	handler, _, mr := setupTestHandler(t)
+func setTestConfig(t *testing.T, client *redis.Client, domain, apiKey string, limit int, enabled bool) {
+	t.Helper()
+	if err := client.SetConfig(context.Background(), models.RateLimitConfig{
+		Domain: domain, APIKey: apiKey, MaxConcurrent: limit, Enabled: enabled,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
 
-	mr.HSet("rl:config:api.example.com:test-key", "max_concurrent", "5")
-	mr.HSet("rl:config:api.example.com:test-key", "enabled", "true")
+func testConfigKey(domain, apiKey string) string {
+	sum := sha256.Sum256([]byte(apiKey))
+	return "rl:config:" + domain + ":" + hex.EncodeToString(sum[:])
+}
+
+func TestAcquireHandler_Success(t *testing.T) {
+	handler, _, _ := setupTestHandler(t)
+
+	setTestConfig(t, handler.redisClient, "api.example.com", "test-key", 5, true)
 
 	reqBody := map[string]interface{}{
 		"domain":  "api.example.com",
@@ -67,10 +85,9 @@ func TestAcquireHandler_Success(t *testing.T) {
 }
 
 func TestAcquireHandler_LimitReached(t *testing.T) {
-	handler, _, mr := setupTestHandler(t)
+	handler, _, _ := setupTestHandler(t)
 
-	mr.HSet("rl:config:api.example.com:test-key", "max_concurrent", "2")
-	mr.HSet("rl:config:api.example.com:test-key", "enabled", "true")
+	setTestConfig(t, handler.redisClient, "api.example.com", "test-key", 2, true)
 
 	reqBody := map[string]interface{}{
 		"domain":  "api.example.com",
@@ -152,10 +169,9 @@ func TestAcquireHandler_ConfigMiss(t *testing.T) {
 }
 
 func TestAcquireHandler_DisabledConfig(t *testing.T) {
-	handler, _, mr := setupTestHandler(t)
+	handler, _, _ := setupTestHandler(t)
 
-	mr.HSet("rl:config:api.example.com:disabled-key", "max_concurrent", "5")
-	mr.HSet("rl:config:api.example.com:disabled-key", "enabled", "false")
+	setTestConfig(t, handler.redisClient, "api.example.com", "disabled-key", 5, false)
 
 	reqBody := map[string]interface{}{
 		"domain":  "api.example.com",
@@ -189,8 +205,7 @@ func TestAcquireHandler_DisabledConfig(t *testing.T) {
 func TestAcquireHandler_InvalidConfig(t *testing.T) {
 	handler, _, mr := setupTestHandler(t)
 
-	mr.HSet("rl:config:api.example.com:invalid-config-key", "max_concurrent", "0")
-	mr.HSet("rl:config:api.example.com:invalid-config-key", "enabled", "true")
+	mr.HSet(testConfigKey("api.example.com", "invalid-config-key"), "max_concurrent", "0", "enabled", "true")
 
 	reqBody := map[string]interface{}{
 		"domain":  "api.example.com",
@@ -287,8 +302,7 @@ func TestAcquireHandler_ValidationError(t *testing.T) {
 func TestAcquireHandler_LeaseExpiredAutoRecovery(t *testing.T) {
 	handler, _, mr := setupTestHandler(t)
 
-	mr.HSet("rl:config:api.example.com:test-key", "max_concurrent", "1")
-	mr.HSet("rl:config:api.example.com:test-key", "enabled", "true")
+	setTestConfig(t, handler.redisClient, "api.example.com", "test-key", 1, true)
 
 	reqBody := map[string]interface{}{
 		"domain":  "api.example.com",
@@ -328,10 +342,9 @@ func TestAcquireHandler_LeaseExpiredAutoRecovery(t *testing.T) {
 }
 
 func TestAcquireHandler_WildcardFallback(t *testing.T) {
-	handler, _, mr := setupTestHandler(t)
+	handler, _, _ := setupTestHandler(t)
 
-	mr.HSet("rl:config:*.example.com:test-key", "max_concurrent", "3")
-	mr.HSet("rl:config:*.example.com:test-key", "enabled", "true")
+	setTestConfig(t, handler.redisClient, "*.example.com", "test-key", 3, true)
 
 	reqBody := map[string]interface{}{
 		"domain":  "api.example.com",
@@ -359,10 +372,9 @@ func TestAcquireHandler_WildcardFallback(t *testing.T) {
 }
 
 func TestAcquireHandler_GlobalFallback(t *testing.T) {
-	handler, _, mr := setupTestHandler(t)
+	handler, _, _ := setupTestHandler(t)
 
-	mr.HSet("rl:config:*:test-key", "max_concurrent", "4")
-	mr.HSet("rl:config:*:test-key", "enabled", "true")
+	setTestConfig(t, handler.redisClient, "*", "test-key", 4, true)
 
 	reqBody := map[string]interface{}{
 		"domain":  "any.domain.com",

@@ -9,10 +9,9 @@ import (
 )
 
 func TestReleaseHandler_Success(t *testing.T) {
-	acquireHandler, releaseHandler, mr := setupTestHandler(t)
+	acquireHandler, releaseHandler, _ := setupTestHandler(t)
 
-	mr.HSet("rl:config:api.example.com:test-key", "max_concurrent", "5")
-	mr.HSet("rl:config:api.example.com:test-key", "enabled", "true")
+	setTestConfig(t, acquireHandler.redisClient, "api.example.com", "test-key", 5, true)
 
 	acquireBody, _ := json.Marshal(map[string]interface{}{
 		"domain":  "api.example.com",

@@ -36,7 +36,7 @@ spec:
                       uri: http://counter-service.default.svc.cluster.local:8080/wasm/token-stats.wasm
                       cluster: counter-service
                       timeout: 10s
-                    sha256: e559101e76aa5419804ab15086dd494b8f70739c4d1931a263ba73df8c7c8691
+                    sha256: 3905ad251a6a9b9ee6ef937a53e4a8ff8258706370b1f59d5fb13896944b53a0
               configuration:
                 "@type": type.googleapis.com/google.protobuf.StringValue
                 value: |

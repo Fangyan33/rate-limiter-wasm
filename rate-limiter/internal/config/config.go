@@ -12,6 +12,7 @@ const (
 	defaultErrorMessage              = "Rate limit exceeded"
 	defaultCounterServiceAcquirePath = "/acquire"
 	defaultCounterServiceReleasePath = "/release"
+	defaultCounterServiceRenewPath   = "/renew"
 	defaultCounterServiceLeaseTTLMS  = 30000
 )
 
@@ -38,6 +39,7 @@ type CounterServiceConfig struct {
 	TimeoutMS   int    `yaml:"timeout_ms"`
 	AcquirePath string `yaml:"acquire_path"`
 	ReleasePath string `yaml:"release_path"`
+	RenewPath   string `yaml:"renew_path"`
 	LeaseTTLMS  int    `yaml:"lease_ttl_ms"`
 
 	leaseTTLMSSet bool `yaml:"-"`
@@ -49,6 +51,7 @@ func (c *CounterServiceConfig) UnmarshalYAML(value *yaml.Node) error {
 		TimeoutMS   int    `yaml:"timeout_ms"`
 		AcquirePath string `yaml:"acquire_path"`
 		ReleasePath string `yaml:"release_path"`
+		RenewPath   string `yaml:"renew_path"`
 		LeaseTTLMS  *int   `yaml:"lease_ttl_ms"`
 	}
 
@@ -61,6 +64,7 @@ func (c *CounterServiceConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.TimeoutMS = raw.TimeoutMS
 	c.AcquirePath = raw.AcquirePath
 	c.ReleasePath = raw.ReleasePath
+	c.RenewPath = raw.RenewPath
 	if raw.LeaseTTLMS != nil {
 		c.LeaseTTLMS = *raw.LeaseTTLMS
 		c.leaseTTLMSSet = true
@@ -100,6 +104,9 @@ func (c *Config) applyDefaults() {
 	}
 	if strings.TrimSpace(c.DistributedLimit.CounterService.ReleasePath) == "" {
 		c.DistributedLimit.CounterService.ReleasePath = defaultCounterServiceReleasePath
+	}
+	if strings.TrimSpace(c.DistributedLimit.CounterService.RenewPath) == "" {
+		c.DistributedLimit.CounterService.RenewPath = defaultCounterServiceRenewPath
 	}
 	if !c.DistributedLimit.CounterService.leaseTTLMSSet {
 		c.DistributedLimit.CounterService.LeaseTTLMS = defaultCounterServiceLeaseTTLMS
@@ -152,6 +159,9 @@ func (c *Config) Validate() error {
 			return err
 		}
 		if err := validateCounterServicePath("release_path", c.DistributedLimit.CounterService.ReleasePath); err != nil {
+			return err
+		}
+		if err := validateCounterServicePath("renew_path", c.DistributedLimit.CounterService.RenewPath); err != nil {
 			return err
 		}
 	}

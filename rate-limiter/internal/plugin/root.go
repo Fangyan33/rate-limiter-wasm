@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	"rate-limiter-wasm/rate-limiter/internal/config"
 	"rate-limiter-wasm/rate-limiter/internal/limiter"
@@ -30,6 +31,13 @@ type rootContext struct {
 	limiter          requestLimiter
 	counterService   config.CounterServiceConfig
 	asyncDistributed bool
+	activeLeases     map[string]*activeLease
+	started          bool
+	renewalReady     bool
+	tickPeriod       uint32
+	now              func() time.Time
+	dispatchHTTPCall httpCallDispatcher
+	setTickPeriod    func(uint32) error
 }
 
 type httpContext struct {
@@ -38,6 +46,8 @@ type httpContext struct {
 	release            func()
 	distributedAPIKey  string
 	distributedLeaseID string
+	counterService     config.CounterServiceConfig
+	acquireStartedAt   time.Time
 }
 
 func NewVMContext() types.VMContext {
@@ -63,6 +73,8 @@ func (r *rootContext) OnPluginStart(pluginConfigurationSize int) types.OnPluginS
 		proxywasm.LogCriticalf("parse plugin configuration: %v", err)
 		return types.OnPluginStartStatusFailed
 	}
+	r.started = true
+	r.configureRenewalTimer()
 
 	return types.OnPluginStartStatusOK
 }
@@ -84,6 +96,12 @@ func (r *rootContext) LoadConfiguration(data []byte) error {
 	r.asyncDistributed = cfg.DistributedLimit.Enabled &&
 		cfg.DistributedLimit.Backend == "counter_service"
 	r.limiter = limiter.NewLocalLimiter(buildLimits(cfg.RateLimits))
+	if r.activeLeases == nil {
+		r.activeLeases = make(map[string]*activeLease)
+	}
+	if r.started {
+		r.configureRenewalTimer()
+	}
 	return nil
 }
 
@@ -124,6 +142,9 @@ func (h *httpContext) OnHttpRequestHeaders(numHeaders int, endOfStream bool) typ
 	}
 
 	if h.root.asyncDistributed {
+		if !h.root.renewalReady {
+			return types.ActionContinue
+		}
 		h.distributedAPIKey = apiKey
 		return h.dispatchAcquire(normalizeHost(host), apiKey)
 	}
@@ -139,6 +160,8 @@ func (h *httpContext) OnHttpRequestHeaders(numHeaders int, endOfStream bool) typ
 
 func (h *httpContext) dispatchAcquire(domain, apiKey string) types.Action {
 	cs := h.root.counterService
+	h.counterService = cs
+	h.acquireStartedAt = h.root.currentTime()
 	body, _ := json.Marshal(struct {
 		Domain string `json:"domain"`
 		APIKey string `json:"api_key"`
@@ -154,7 +177,7 @@ func (h *httpContext) dispatchAcquire(domain, apiKey string) types.Action {
 		timeout = 5000
 	}
 
-	_, err := proxywasm.DispatchHttpCall(
+	_, err := h.root.dispatchCall(
 		cs.Cluster,
 		[][2]string{
 			{":method", "POST"},
@@ -169,7 +192,7 @@ func (h *httpContext) dispatchAcquire(domain, apiKey string) types.Action {
 	)
 	if err != nil {
 		proxywasm.LogErrorf("dispatch acquire callout: %v", err)
-		return h.reject()
+		return types.ActionContinue
 	}
 
 	return types.ActionPause
@@ -181,11 +204,12 @@ func (h *httpContext) OnHttpStreamDone() {
 		h.release = nil
 	}
 
-	if h.distributedLeaseID == "" || h.root == nil || !h.root.asyncDistributed {
+	if h.distributedLeaseID == "" || h.root == nil {
 		return
 	}
+	delete(h.root.activeLeases, h.distributedLeaseID)
 
-	cs := h.root.counterService
+	cs := h.counterService
 	body, _ := json.Marshal(struct {
 		APIKey  string `json:"api_key"`
 		LeaseID string `json:"lease_id"`
@@ -199,7 +223,7 @@ func (h *httpContext) OnHttpStreamDone() {
 		timeout = 5000
 	}
 
-	_, err := proxywasm.DispatchHttpCall(
+	_, err := h.root.dispatchCall(
 		cs.Cluster,
 		[][2]string{
 			{":method", "POST"},
@@ -267,6 +291,11 @@ func (h *httpContext) onAcquireResponse(numHeaders, bodySize, numTrailers int) {
 	}
 
 	h.distributedLeaseID = resp.LeaseID
+	if resp.LeaseID != "" {
+		h.root.trackLease(resp.LeaseID, h.counterService, h.acquireStartedAt)
+	} else {
+		proxywasm.LogWarn("acquire succeeded without lease_id; failing open without renewal")
+	}
 	if err := proxywasm.ResumeHttpRequest(); err != nil {
 		proxywasm.LogErrorf("resume http request: %v", err)
 	}

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -63,8 +62,7 @@ func (c *Client) Acquire(ctx context.Context, req models.AcquireRequest) (*Acqui
 	}
 	keys = append(keys, globalConfigKey)
 
-	nowMS := time.Now().UnixMilli()
-	args := []interface{}{req.TTLMS, nowMS, leaseID}
+	args := []interface{}{req.TTLMS, leaseID}
 
 	result, err := c.rdb.Eval(ctx, GetAcquireScript(), keys, args...).Result()
 	if err != nil {
@@ -128,5 +126,28 @@ func (c *Client) Release(ctx context.Context, leaseID string) (*ReleaseResult, e
 		return &res, ErrLeaseNotFound
 	}
 
+	return &res, nil
+}
+
+// Renew atomically extends both the lease pointer and its existing ZSET member.
+func (c *Client) Renew(ctx context.Context, req models.RenewRequest) (*models.RenewResult, error) {
+	if err := req.Validate(); err != nil {
+		return nil, err
+	}
+	leaseKey := c.Key(fmt.Sprintf("lease:%s", req.LeaseID))
+	result, err := c.rdb.Eval(ctx, GetRenewScript(), []string{leaseKey}, req.LeaseID, req.TTLMS).Text()
+	if err != nil {
+		if isNetworkError(err) {
+			return nil, ErrRedisUnavailable
+		}
+		return nil, fmt.Errorf("eval renew script: %w", err)
+	}
+	var res models.RenewResult
+	if err := json.Unmarshal([]byte(result), &res); err != nil {
+		return nil, fmt.Errorf("unmarshal renew result: %w", err)
+	}
+	if !res.Renewed {
+		return &res, ErrLeaseNotFound
+	}
 	return &res, nil
 }
