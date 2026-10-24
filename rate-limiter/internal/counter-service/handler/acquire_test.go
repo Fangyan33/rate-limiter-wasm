@@ -266,14 +266,6 @@ func TestAcquireHandler_ValidationError(t *testing.T) {
 			},
 		},
 		{
-			name: "empty api_key",
-			reqBody: map[string]interface{}{
-				"domain":  "api.example.com",
-				"api_key": "",
-				"ttl_ms":  30000,
-			},
-		},
-		{
 			name: "invalid ttl_ms",
 			reqBody: map[string]interface{}{
 				"domain":  "api.example.com",

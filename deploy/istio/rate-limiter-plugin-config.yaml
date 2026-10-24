@@ -3,12 +3,17 @@
 # 分布式限流模式（推荐）：
 # - 限流配置存储在 Redis 中，通过 Counter Service 配置管理 API 动态管理
 # - 支持按 domain + api_key 维度配置，支持通配符域名匹配
+# - api_key 为空或省略时按实际请求域名共享总并发额度，不要求 Authorization
 # - 配置变更实时生效，无需重启插件
 #
 # 配置管理示例：
 #   curl -X PUT http://counter-service:8080/config \
 #     -H "Content-Type: application/json" \
 #     -d '{"domain":"api.example.com","api_key":"key001","max_concurrent":5,"enabled":true}'
+# 仅按域名限流：
+#   curl -X PUT http://counter-service:8080/config \
+#     -H "Content-Type: application/json" \
+#     -d '{"domain":"api.example.com","api_key":"","max_concurrent":10,"enabled":true}'
 
 domains:
   - api.example.com
@@ -17,7 +22,8 @@ domains:
 # rate_limits 配置项已废弃（分布式模式下）
 # 所有限流配置通过 Counter Service API 管理，存储在 Redis:
 #   - 配置键格式: rl:config:{domain}:{sha256(api_key)}
-#   - 通配符匹配: 精确 > *.parent > *
+#   - 优先查空 key 规则（精确 > *.parent > *），不存在时再按同样顺序查具体 key
+#   - 命中规则被禁用或超限时拒绝，不回退；通配符下各实际域名独立计数
 #   - 配置字段: max_concurrent, enabled, tier
 #
 # 如需使用本地限流模式，请设置 distributed_limit.enabled: false
@@ -28,6 +34,12 @@ domains:
 #     max_concurrent: 2
 #   - api_key: key_premium_001
 #     max_concurrent: 5
+#
+# 本地模式仅按域名限流时，改用以下规则；每个命中 domains 的实际域名独立计数：
+# rate_limits:
+#   - api_key: ""
+#     max_concurrent: 10
+# 空 key 规则优先于同一配置内所有具体 key 规则。
 
 distributed_limit:
   enabled: true

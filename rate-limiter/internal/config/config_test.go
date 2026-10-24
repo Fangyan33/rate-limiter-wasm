@@ -215,6 +215,27 @@ error_response:
 	}
 }
 
+func TestParseDomainOnlyRateLimit(t *testing.T) {
+	for _, entry := range []string{"api_key: \"\"\n    max_concurrent: 2", "max_concurrent: 2"} {
+		cfg, err := config.Parse([]byte("domains: [api.example.com]\nrate_limits:\n  - " + entry + "\n"))
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", entry, err)
+		}
+		if cfg.RateLimits[0].APIKey != "" || cfg.RateLimits[0].MaxConcurrent != 2 {
+			t.Fatalf("unexpected domain rule: %+v", cfg.RateLimits)
+		}
+	}
+	for _, entries := range []string{
+		"  - max_concurrent: 1\n  - api_key: \"\"\n    max_concurrent: 2\n",
+		"  - api_key: \"   \"\n    max_concurrent: 2\n",
+		"  - max_concurrent: 0\n",
+	} {
+		if _, err := config.Parse([]byte("domains: [api.example.com]\nrate_limits:\n" + entries)); err == nil {
+			t.Fatalf("expected invalid rules to be rejected: %q", entries)
+		}
+	}
+}
+
 func TestParseConfigDefaultsErrorResponseWhenOmitted(t *testing.T) {
 	cfg, err := config.Parse([]byte(`domains:
   - api.example.com

@@ -81,11 +81,50 @@ error_response:
 - `enabled`: 是否启用（true/false）
 - `tier`: 可选，用户层级标识（如 basic, premium, enterprise）
 
-**通配符匹配优先级：**
+`api_key` 为空字符串或省略时表示域名规则，使用 `sha256("")` 存储。域名规则下，同一实际域名的所有请求共享并发额度，包括无 Authorization、格式错误的 Authorization 和携带任意 API Key 的请求。
+
+**规则匹配优先级：**
+
+先查空 key 的域名规则，顺序为精确域名 → 父域名通配 → 全局通配；只有这三类规则全部不存在时，才按以下顺序查找请求中的具体 API Key：
 
 1. 精确匹配：`rl:config:api.example.com:<sha256(key001)>`
 2. 父域名通配：`rl:config:*.example.com:<sha256(key001)>`
 3. 全局通配：`rl:config:*:<sha256(key001)>`
+
+域名通配规则也优先于精确域名的具体 key 规则。命中规则若被禁用、阈值无效或并发已满，直接拒绝，不再回退；禁用规则仍沿用 `api_key_disabled` 拒绝原因。通配符只查当前父域（例如 `a.b.example.com` 查 `*.b.example.com`）和全局 `*`，计数按实际请求域名隔离，不同子域名不会共享额度。插件的 `domains` 仍决定哪些请求进入限流。
+
+#### 仅按域名限流
+
+例如，将 `api.example.com` 的总并发数限制为 10：
+
+```bash
+curl -X PUT http://counter-service:8080/config \
+  -H "Content-Type: application/json" \
+  -d '{"domain":"api.example.com","api_key":"","max_concurrent":10,"enabled":true}'
+
+# 空 api_key 也可以省略；查询和删除时同样适用
+curl "http://counter-service:8080/config?domain=api.example.com"
+curl -X DELETE "http://counter-service:8080/config?domain=api.example.com&api_key="
+```
+
+配置生效后，带不同 key 的请求和不带 key 的请求合计最多同时运行 10 个；流式请求在结束前持续占用额度。没有匹配的域名规则时，仍须匹配有效 Bearer 中的具体 key 配置，否则拒绝。
+
+本地静态模式使用如下配置：
+
+```yaml
+domains:
+  - api.example.com
+  - other.example.com
+rate_limits:
+  - api_key: ""
+    max_concurrent: 10
+distributed_limit:
+  enabled: false
+```
+
+两个域名各自拥有 10 个并发槽位。每份本地配置只能包含一条空 key 规则，该规则优先于同一配置中的具体 key 规则。本地额度仅在当前插件实例内生效；未配置空 key 时，原有按 key 的计数行为不变。不将非空 key 自动去空格后当作域名规则。
+
+升级时先发布 Counter Service，再发布 WASM 插件，最后创建空 key 规则。无需迁移已有 Redis 数据；规则切换仅影响后续 acquire，已有租约仍在原集合中续约和释放，不追溯合并。因此切换期间已有请求不会自动计入新的域名额度。删除域名规则后，后续请求恢复使用具体 key 规则。
 
 #### 配置管理 API
 
@@ -522,7 +561,7 @@ done
 
 ### 降级行为
 
-当 Counter Service 调用失败、超时、返回非 `200`，或返回体无法解析时，插件当前行为是 **fail-open 放行当前请求**，不会切回本地限流。
+当 Counter Service 调用失败、超时、返回非 `200`，或返回体无法解析时，插件当前行为是 **fail-open 放行当前请求**，不会切回本地限流。缺少或格式错误的 Bearer 凭证也采用相同策略；服务正常时仍必须匹配限流规则才能通过。
 
 当 Counter Service 返回 `HTTP 200` 且 `allowed=false` 时，插件会按 `error_response` 配置直接拒绝请求。
 
@@ -581,7 +620,7 @@ done
 2. 检查 API Key：
 
    ```bash
-   # 确保 Authorization 头格式正确
+   # 使用具体 key 规则时，确保 Authorization 头格式正确；域名规则不要求该头
    curl -v -H "Authorization: Bearer key_basic_001" ...
    ```
 
@@ -633,7 +672,7 @@ token_statistics:
 
 统计和 `stream_options.include_usage` 注入都要求请求命中 `domains`，并携带 `Authorization: Bearer <JWT>`。JWT payload 必须包含有效的 `uid`：支持非空字符串或整数，去掉首尾空格后不超过 64 字节，且不含换行、回车或制表符；Authorization 头不得超过 16 KiB。
 
-JWT 格式错误、缺少 `uid` 或 `uid` 不合法时，该请求仍继续转发，但同时关闭 Token 统计和 usage 注入。普通 `Bearer key_basic_001` 可用于限流，不满足 Token 统计条件；同时启用两个插件时，应把完整 JWT 作为 API Key 注册到 Counter Service。
+JWT 格式错误、缺少 `uid` 或 `uid` 不合法时，该请求仍继续转发，但同时关闭 Token 统计和 usage 注入。普通 `Bearer key_basic_001` 可用于限流，不满足 Token 统计条件；同时启用两个插件且使用具体 key 限流时，应把完整 JWT 作为 API Key 注册到 Counter Service。使用空 key 的域名规则时，无需为限流注册每个 JWT，但 Token 统计仍要求携带有效格式且包含 `uid` 的 JWT。
 
 此处只解析 JWT payload，不校验签名、有效期或颁发方。身份真实性由上游认证链路保障。
 

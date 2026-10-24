@@ -254,14 +254,23 @@ func TestRenewalDispatchFailureRetriesAndBoundsTimeout(t *testing.T) {
 }
 
 func TestLongRequestAcrossMultipleTTLsThroughCounterService(t *testing.T) {
+	t.Run("key rule", func(t *testing.T) { testLongRequestThroughCounterService(t, false) })
+	t.Run("domain rule without credentials", func(t *testing.T) { testLongRequestThroughCounterService(t, true) })
+}
+
+func testLongRequestThroughCounterService(t *testing.T, domainOnly bool) {
 	_, host, now := newRenewalHost(t, nil)
 	mr := miniredis.RunT(t)
 	mr.SetTime(*now)
 	client, err := redis.NewClient(redis.Config{Addr: mr.Addr()})
 	require.NoError(t, err)
 	t.Cleanup(func() { client.Close() })
+	apiKey := "key001"
+	if domainOnly {
+		apiKey = ""
+	}
 	require.NoError(t, client.SetConfig(context.Background(), models.RateLimitConfig{
-		Domain: "api.example.com", APIKey: "key001", MaxConcurrent: 1, Enabled: true,
+		Domain: "api.example.com", APIKey: apiKey, MaxConcurrent: 1, Enabled: true,
 	}))
 	mux := http.NewServeMux()
 	mux.Handle("/acquire", handler.NewAcquireHandler(client))
@@ -278,7 +287,12 @@ func TestLongRequestAcrossMultipleTTLsThroughCounterService(t *testing.T) {
 		mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, bytes.NewReader(call.Body)))
 		host.CallOnHttpCallResponse(call.CalloutID, [][2]string{{":status", strconv.Itoa(w.Code)}}, nil, w.Body.Bytes())
 	}
-	first := beginRenewalRequest(t, host)
+	first := host.InitializeHttpContext()
+	headers := [][2]string{{":authority", "api.example.com"}}
+	if !domainOnly {
+		headers = append(headers, [2]string{"authorization", "Bearer key001"})
+	}
+	require.Equal(t, types.ActionPause, host.CallOnRequestHeaders(first, headers, false))
 	respond(host.GetCalloutAttributesFromContext(first)[0])
 	require.Equal(t, types.ActionContinue, host.GetCurrentHttpStreamAction(first))
 	for i := 0; i < 10; i++ {
@@ -302,4 +316,26 @@ func TestLongRequestAcrossMultipleTTLsThroughCounterService(t *testing.T) {
 	respond(host.GetCalloutAttributesFromContext(third)[0])
 	require.Nil(t, host.GetSentLocalResponse(third))
 	require.Equal(t, types.ActionContinue, host.GetCurrentHttpStreamAction(third))
+}
+
+func TestMissingCredentialsFailOpenOnDispatchOrTimerFailure(t *testing.T) {
+	for _, failure := range []string{"dispatch", "timer"} {
+		t.Run(failure, func(t *testing.T) {
+			root, host, _ := newRenewalHost(t, func(root *rootContext) {
+				if failure == "timer" {
+					root.setTickPeriod = func(uint32) error { return errors.New("timer unavailable") }
+				} else {
+					root.dispatchHTTPCall = func(string, [][2]string, []byte, [][2]string, uint32, func(int, int, int)) (uint32, error) {
+						return 0, errors.New("dispatch unavailable")
+					}
+				}
+			})
+			id := host.InitializeHttpContext()
+			require.Equal(t, types.ActionContinue, host.CallOnRequestHeaders(id, [][2]string{{":authority", "api.example.com"}}, false))
+			require.Nil(t, host.GetSentLocalResponse(id))
+			host.CompleteHttpContext(id)
+			require.Empty(t, root.activeLeases)
+			require.Empty(t, host.GetCalloutAttributesFromContext(id))
+		})
+	}
 }

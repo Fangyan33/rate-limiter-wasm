@@ -82,7 +82,7 @@ fi
 # 解析并导入每个配置
 count=0
 yq eval '.rate_limits[] | @json' "$CONFIG_FILE" | while read -r line; do
-  api_key=$(echo "$line" | jq -r '.api_key')
+  api_key=$(echo "$line" | jq -r '.api_key // ""')
   max_concurrent=$(echo "$line" | jq -r '.max_concurrent')
   tier=$(echo "$line" | jq -r '.tier // "standard"')
 

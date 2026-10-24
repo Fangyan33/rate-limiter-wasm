@@ -3,9 +3,10 @@ package limiter
 import "sync"
 
 type LocalLimiter struct {
-	mu       sync.Mutex
-	limits   map[string]int
-	inFlight map[string]int
+	mu             sync.Mutex
+	limits         map[string]int
+	inFlight       map[string]int
+	domainInFlight map[string]int
 }
 
 func NewLocalLimiter(limits map[string]int) *LocalLimiter {
@@ -15,8 +16,9 @@ func NewLocalLimiter(limits map[string]int) *LocalLimiter {
 	}
 
 	return &LocalLimiter{
-		limits:   cloned,
-		inFlight: make(map[string]int, len(cloned)),
+		limits:         cloned,
+		inFlight:       make(map[string]int, len(cloned)),
+		domainInFlight: make(map[string]int),
 	}
 }
 
@@ -28,11 +30,32 @@ func (l *LocalLimiter) Acquire(apiKey string) (func(), bool) {
 	if !ok {
 		return nil, false
 	}
-	if l.inFlight[apiKey] >= limit {
+	return l.acquireLocked(l.inFlight, apiKey, limit)
+}
+
+// AcquireForDomain gives the empty-key rule priority over all API key rules.
+// Domain counters are separate from legacy API key counters, even if names match.
+func (l *LocalLimiter) AcquireForDomain(domain, apiKey string) (func(), bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if limit, ok := l.limits[""]; ok {
+		return l.acquireLocked(l.domainInFlight, domain, limit)
+	}
+	limit, ok := l.limits[apiKey]
+	if !ok {
+		return nil, false
+	}
+	return l.acquireLocked(l.inFlight, apiKey, limit)
+}
+
+// acquireLocked requires l.mu to be held; the returned release locks it itself.
+func (l *LocalLimiter) acquireLocked(inFlight map[string]int, key string, limit int) (func(), bool) {
+	if inFlight[key] >= limit {
 		return nil, false
 	}
 
-	l.inFlight[apiKey]++
+	inFlight[key]++
 
 	released := false
 	return func() {
@@ -44,12 +67,12 @@ func (l *LocalLimiter) Acquire(apiKey string) (func(), bool) {
 		}
 		released = true
 
-		current := l.inFlight[apiKey]
+		current := inFlight[key]
 		if current <= 1 {
-			delete(l.inFlight, apiKey)
+			delete(inFlight, key)
 			return
 		}
-		l.inFlight[apiKey] = current - 1
+		inFlight[key] = current - 1
 	}, true
 }
 

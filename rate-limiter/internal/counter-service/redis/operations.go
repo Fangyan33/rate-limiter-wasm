@@ -44,23 +44,17 @@ func (c *Client) Acquire(ctx context.Context, req models.AcquireRequest) (*Acqui
 	leaseID := uuid.New().String()
 	apiKeyHash := hashAPIKey(req.APIKey)
 
-	configKey := c.Key(fmt.Sprintf("config:%s:%s", req.Domain, apiKeyHash))
+	keyConfigs := c.configKeys(req.Domain, apiKeyHash)
+	domainHash := hashAPIKey("")
+	domainConfigs := c.configKeys(req.Domain, domainHash)
 	leasesKey := c.Key(fmt.Sprintf("leases:%s:%s", req.Domain, apiKeyHash))
+	domainLeasesKey := c.Key(fmt.Sprintf("leases:%s:%s", req.Domain, domainHash))
 	leaseKey := c.Key(fmt.Sprintf("lease:%s", leaseID))
 
-	wildcardConfigKey := ""
-	if parts := strings.SplitN(req.Domain, ".", 2); len(parts) == 2 {
-		wildcardConfigKey = c.Key(fmt.Sprintf("config:*.%s:%s", parts[1], apiKeyHash))
+	keys := []string{
+		keyConfigs[0], leasesKey, leaseKey, keyConfigs[1], keyConfigs[2],
+		domainConfigs[0], domainConfigs[1], domainConfigs[2], domainLeasesKey,
 	}
-	globalConfigKey := c.Key(fmt.Sprintf("config:*:%s", apiKeyHash))
-
-	keys := []string{configKey, leasesKey, leaseKey}
-	if wildcardConfigKey != "" {
-		keys = append(keys, wildcardConfigKey)
-	} else {
-		keys = append(keys, "")
-	}
-	keys = append(keys, globalConfigKey)
 
 	args := []interface{}{req.TTLMS, leaseID}
 
@@ -98,6 +92,19 @@ func (c *Client) Acquire(ctx context.Context, req models.AcquireRequest) (*Acqui
 	}
 
 	return &res, nil
+}
+
+// configKeys preserves the exact, immediate-parent wildcard, global order.
+func (c *Client) configKeys(domain, apiKeyHash string) [3]string {
+	wildcard := ""
+	if parts := strings.SplitN(domain, ".", 2); len(parts) == 2 {
+		wildcard = c.Key(fmt.Sprintf("config:*.%s:%s", parts[1], apiKeyHash))
+	}
+	return [3]string{
+		c.Key(fmt.Sprintf("config:%s:%s", domain, apiKeyHash)),
+		wildcard,
+		c.Key(fmt.Sprintf("config:*:%s", apiKeyHash)),
+	}
 }
 
 // Release 执行释放并发槽位（调用 Lua release_with_lease）

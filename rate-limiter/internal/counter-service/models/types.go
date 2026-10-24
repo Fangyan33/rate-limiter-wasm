@@ -1,9 +1,9 @@
 package models
 
-// AcquireRequest 获取并发槽位的请求（新增 Domain 字段）
+// AcquireRequest 获取并发槽位的请求。
 type AcquireRequest struct {
-	Domain string `json:"domain"` // 新增：域名，用于配置查找
-	APIKey string `json:"api_key"`
+	Domain string `json:"domain"`  // 实际请求域名，用于配置查找和计数。
+	APIKey string `json:"api_key"` // 空值只匹配域名规则；域名规则始终优先。
 	TTLMS  int64  `json:"ttl_ms"`
 }
 
@@ -57,7 +57,7 @@ type RenewResult struct {
 // RateLimitConfig 限流配置（用于配置管理 API）
 type RateLimitConfig struct {
 	Domain        string `json:"domain"`
-	APIKey        string `json:"api_key"`
+	APIKey        string `json:"api_key"` // 空值表示该域名的总并发规则。
 	APIKeyHash    string `json:"api_key_hash,omitempty"`
 	MaxConcurrent int    `json:"max_concurrent"`
 	Enabled       bool   `json:"enabled"`
@@ -66,23 +66,10 @@ type RateLimitConfig struct {
 	UpdatedAt     int64  `json:"updated_at,omitempty"`
 }
 
-// 错误定义
-// Remove duplicate error definitions - they are already in errors.go
-// var (
-// 	ErrEmptyAPIKey   = errors.New("domain cannot be empty")
-// 	ErrEmptyAPIKey   = errors.New("api_key cannot be empty")
-// 	ErrInvalidTTL    = errors.New("ttl_ms must be positive")
-// 	ErrEmptyLeaseID  = errors.New("lease_id cannot be empty")
-// 	ErrInvalidLimit  = errors.New("max_concurrent must be positive")
-// )
-
 // Validate 验证 AcquireRequest
 func (r *AcquireRequest) Validate() error {
 	if r.Domain == "" {
-		return ErrEmptyAPIKey // domain is required, reuse api_key error for simplicity
-	}
-	if r.APIKey == "" {
-		return ErrEmptyAPIKey
+		return ErrEmptyDomain
 	}
 	if r.TTLMS <= 0 {
 		return ErrInvalidTTL
@@ -92,9 +79,6 @@ func (r *AcquireRequest) Validate() error {
 
 // Validate 验证 ReleaseRequest
 func (r *ReleaseRequest) Validate() error {
-	if r.APIKey == "" {
-		return ErrEmptyAPIKey
-	}
 	if r.LeaseID == "" {
 		return ErrEmptyLeaseID
 	}
@@ -104,10 +88,7 @@ func (r *ReleaseRequest) Validate() error {
 // Validate 验证 RateLimitConfig
 func (c *RateLimitConfig) Validate() error {
 	if c.Domain == "" {
-		return ErrEmptyAPIKey // domain is required, reuse api_key error for simplicity
-	}
-	if c.APIKey == "" {
-		return ErrEmptyAPIKey
+		return ErrEmptyDomain
 	}
 	if c.MaxConcurrent <= 0 {
 		return ErrInvalidLimit

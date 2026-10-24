@@ -24,7 +24,7 @@ type Config struct {
 }
 
 type RateLimit struct {
-	APIKey        string `yaml:"api_key"`
+	APIKey        string `yaml:"api_key"` // Empty means a shared limit per matched domain.
 	MaxConcurrent int    `yaml:"max_concurrent"`
 }
 
@@ -130,8 +130,8 @@ func (c *Config) Validate() error {
 
 	seen := make(map[string]struct{}, len(c.RateLimits))
 	for _, limit := range c.RateLimits {
-		if strings.TrimSpace(limit.APIKey) == "" {
-			return fmt.Errorf("rate_limits.api_key must not be empty")
+		if limit.APIKey != "" && strings.TrimSpace(limit.APIKey) == "" {
+			return fmt.Errorf("rate_limits.api_key must not contain only whitespace")
 		}
 		if limit.MaxConcurrent <= 0 {
 			return fmt.Errorf("rate_limits.max_concurrent must be greater than zero")

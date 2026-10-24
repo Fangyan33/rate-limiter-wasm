@@ -12,6 +12,10 @@ const (
 -- KEYS[3]: lease_key         (rl:lease:<lease_id>)
 -- KEYS[4]: wildcard_config_key
 -- KEYS[5]: global_config_key
+-- KEYS[6]: domain_config_key (empty API key hash)
+-- KEYS[7]: wildcard_domain_config_key
+-- KEYS[8]: global_domain_config_key
+-- KEYS[9]: domain_leases_key (actual request domain, empty API key hash)
 -- ARGV[1]: lease_ttl_ms
 -- ARGV[2]: lease_id
 
@@ -30,12 +34,24 @@ local function get_config(key)
     return result
 end
 
-local config = get_config(KEYS[1])
+-- Resolve domain rules first, and select their shared counter atomically.
+local config = get_config(KEYS[6])
 if not config then
-    config = get_config(KEYS[4])
+    config = get_config(KEYS[7])
 end
 if not config then
-    config = get_config(KEYS[5])
+    config = get_config(KEYS[8])
+end
+local leases_key = KEYS[9]
+if not config then
+    leases_key = KEYS[2]
+    config = get_config(KEYS[1])
+    if not config then
+        config = get_config(KEYS[4])
+    end
+    if not config then
+        config = get_config(KEYS[5])
+    end
 end
 
 if not config then
@@ -51,7 +67,6 @@ if not max_concurrent or max_concurrent <= 0 then
     return cjson.encode({allowed = false, reason = "invalid_config", message = "Invalid max_concurrent configuration"})
 end
 
-local leases_key = KEYS[2]
 local redis_time = redis.call('TIME')
 local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
 redis.call('ZREMRANGEBYSCORE', leases_key, '-inf', now_ms)

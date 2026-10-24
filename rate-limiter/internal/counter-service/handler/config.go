@@ -64,8 +64,8 @@ func (h *ConfigHandler) handleGetConfig(w http.ResponseWriter, r *http.Request) 
 	domain := r.URL.Query().Get("domain")
 	apiKey := r.URL.Query().Get("api_key")
 
-	if domain == "" || apiKey == "" {
-		h.writeError(w, http.StatusBadRequest, "missing domain or api_key query param")
+	if domain == "" {
+		h.writeError(w, http.StatusBadRequest, "missing domain query param")
 		return
 	}
 
@@ -87,8 +87,8 @@ func (h *ConfigHandler) handleDeleteConfig(w http.ResponseWriter, r *http.Reques
 	domain := r.URL.Query().Get("domain")
 	apiKey := r.URL.Query().Get("api_key")
 
-	if domain == "" || apiKey == "" {
-		h.writeError(w, http.StatusBadRequest, "missing domain or api_key query param")
+	if domain == "" {
+		h.writeError(w, http.StatusBadRequest, "missing domain query param")
 		return
 	}
 

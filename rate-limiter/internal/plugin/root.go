@@ -17,7 +17,7 @@ import (
 )
 
 type requestLimiter interface {
-	Acquire(apiKey string) (func(), bool)
+	AcquireForDomain(domain, apiKey string) (func(), bool)
 }
 
 type vmContext struct {
@@ -131,14 +131,11 @@ func (h *httpContext) OnHttpRequestHeaders(numHeaders int, endOfStream bool) typ
 		return types.ActionContinue
 	}
 
-	authorization, err := proxywasm.GetHttpRequestHeader("authorization")
-	if err != nil {
-		return h.reject()
-	}
-
-	apiKey, err := auth.ParseBearerToken(authorization)
-	if err != nil {
-		return h.reject()
+	// A domain-only rule also applies to missing or malformed credentials.
+	// Leave authentication parsing unchanged for other plugins.
+	var apiKey string
+	if authorization, err := proxywasm.GetHttpRequestHeader("authorization"); err == nil {
+		apiKey, _ = auth.ParseBearerToken(authorization)
 	}
 
 	if h.root.asyncDistributed {
@@ -149,7 +146,7 @@ func (h *httpContext) OnHttpRequestHeaders(numHeaders int, endOfStream bool) typ
 		return h.dispatchAcquire(normalizeHost(host), apiKey)
 	}
 
-	release, ok := h.root.limiter.Acquire(apiKey)
+	release, ok := h.root.limiter.AcquireForDomain(normalizeHost(host), apiKey)
 	if !ok {
 		return h.reject()
 	}

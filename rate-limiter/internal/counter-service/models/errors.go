@@ -3,8 +3,8 @@ package models
 import "errors"
 
 var (
-	// ErrEmptyAPIKey is returned when api_key is empty
-	ErrEmptyAPIKey = errors.New("api_key cannot be empty")
+	// ErrEmptyDomain is returned when domain is empty.
+	ErrEmptyDomain = errors.New("domain cannot be empty")
 
 	// ErrInvalidLimit is returned when limit is invalid
 	ErrInvalidLimit = errors.New("limit must be greater than 0")
