@@ -12,6 +12,41 @@
 
 以下构建命令从仓库根目录执行。历史需求记录已归档到 [docs/specs/PRD.md](docs/specs/PRD.md)，其中未完成或已替代的设计不代表当前能力。
 
+## 统一构建与制品打包
+
+本地需安装 Git、GNU Make、Go、TinyGo，以及构建镜像所需的 Docker。打包还使用 GNU tar、sha256sum、find、sort、xargs 和 sed。Go 版本需满足各模块要求；现有构建使用 TinyGo 0.40.1。
+
+```bash
+make version          # 查看版本号
+make wasm             # 构建 rate-limiter.wasm 和 token-stats.wasm
+make counter-service  # 构建 Linux counter-service 二进制
+make build            # 构建二进制和两个 WASM，无需 Docker
+make image            # 构建二进制、两个 WASM 和镜像
+make artifacts        # 构建全部制品并生成归档，直接 make 也执行此目标
+
+# 指定镜像仓库或目标架构；构建后不会自动推送镜像
+make artifacts IMAGE_REPOSITORY=registry.example.com/gateway/counter-service ARCH=arm64
+```
+
+默认版本取当前分支 HEAD 可达的最近 Git tag（`git describe --tags --abbrev=0`）。比较 HEAD 与 tag 所指提交的 committer 时间：HEAD 更晚时使用 HEAD 的 12 位短 commit ID，否则使用 tag 原名；没有可达 tag 时使用短 commit ID。轻量 tag 和附注 tag 均支持，附注 tag 的创建时间不参与比较。工作区未提交的修改不会改变版本号。可用 `VERSION=v1.2.3` 手动覆盖；版本号需符合 Docker tag 格式。
+
+默认架构为 `amd64`，所有输出位于 `dist/<版本>/linux-<架构>/`，可用 `DIST_DIR` 修改输出根目录。完整制品包括：
+
+- `counter-service`：Linux 静态二进制。
+- `rate-limiter.wasm`、`token-stats.wasm`：与镜像内文件一致的 WASM。
+- `counter-service-image.tar`：可用 `docker load` 导入的镜像，镜像名为 `<IMAGE_REPOSITORY>:<版本>`，仓库名默认为 `counter-service`。
+- `deploy/istio/`：部署清单副本，其中 Counter Service 镜像版本、两个 EnvoyFilter 的 SHA256 已按本次构建更新。
+- `VERSION`、`README.md`、`SHA256SUMS`：版本、使用说明及目录内文件的校验和。
+
+同时生成 `dist/rate-limiter-wasm-<版本>-linux-<架构>.tar.gz` 及对应的 `.sha256` 文件。解压后可执行：
+
+```bash
+sha256sum -c SHA256SUMS
+docker load -i counter-service-image.tar
+```
+
+部署前仍需审阅清单中的命名空间、网关标签、域名及 Redis 连接信息，按下文顺序部署。打包只修改输出目录中的清单副本。原有 `bash ./build.sh` 和直接从源码构建镜像的命令仍可使用。
+
 ## 文件说明
 
 ### `rate-limiter` 相关
