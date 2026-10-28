@@ -557,7 +557,7 @@ error_response:
 		t.Fatalf("expected one counter-service callout, got %d", len(callouts))
 	}
 
-	host.CallOnHttpCallResponse(callouts[0].CalloutID, [][2]string{{":status", "200"}}, nil, []byte(`{"allowed":false}`))
+	host.CallOnHttpCallResponse(callouts[0].CalloutID, [][2]string{{":status", "200"}}, nil, []byte(`{"allowed":false,"reason":"limit_exceeded"}`))
 
 	resp := host.GetSentLocalResponse(contextID)
 	if resp == nil {

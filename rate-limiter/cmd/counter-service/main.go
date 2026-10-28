@@ -20,21 +20,14 @@ func main() {
 	keyPrefix := getEnv("REDIS_KEY_PREFIX", "rl:")
 	port := getEnv("PORT", "8080")
 
-	client, err := redis.NewClient(redis.Config{
+	client := redis.NewLazyClient(redis.Config{
 		Addr:      redisAddr,
 		Password:  redisPassword,
 		DB:        0,
 		KeyPrefix: keyPrefix,
 	})
-	if err != nil {
-		log.Fatalf("failed to create redis client: %v", err)
-	}
 	defer client.Close()
-
-	if err := client.Ping(context.Background()); err != nil {
-		log.Fatalf("failed to ping redis: %v", err)
-	}
-	log.Printf("connected to redis at %s", redisAddr)
+	log.Printf("configured redis at %s; connections are established on demand", redisAddr)
 
 	acquireHandler := handler.NewAcquireHandler(client)
 	releaseHandler := handler.NewReleaseHandler(client)

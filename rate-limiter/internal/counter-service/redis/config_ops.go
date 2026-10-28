@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -101,15 +102,22 @@ func (c *Client) ListConfigs(ctx context.Context, pattern string, cursor uint64,
 	}
 
 	var raw struct {
-		Cursor  string              `json:"cursor"`
-		Configs []map[string]string `json:"configs"`
+		Cursor  string          `json:"cursor"`
+		Configs json.RawMessage `json:"configs"`
 	}
 	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
 		return nil, err
 	}
 
-	configs := make([]models.RateLimitConfig, 0, len(raw.Configs))
-	for _, item := range raw.Configs {
+	var page []map[string]string
+	// Redis cjson 将空 Lua table 编码为 {}，对外仍返回空数组并保留 cursor。
+	if !bytes.Equal(bytes.TrimSpace(raw.Configs), []byte("{}")) {
+		if err := json.Unmarshal(raw.Configs, &page); err != nil {
+			return nil, err
+		}
+	}
+	configs := make([]models.RateLimitConfig, 0, len(page))
+	for _, item := range page {
 		key := item["key"]
 		// 解析 key 为 domain:api_key_hash
 		parts := strings.SplitN(strings.TrimPrefix(key, c.prefix+"config:"), ":", 2)

@@ -40,16 +40,30 @@ type Client struct {
 
 // NewClient 创建 Redis 客户端（支持配置结构体）
 func NewClient(cfg Config) (*Client, error) {
+	client := NewLazyClient(cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Ping(ctx); err != nil {
+		client.Close()
+		return nil, fmt.Errorf("redis ping failed: %w", err)
+	}
+	return client, nil
+}
+
+// NewLazyClient allows the HTTP/WASM server to start even when Redis is unavailable.
+// Redis operations still return errors to their handlers; they never invent a denial.
+func NewLazyClient(cfg Config) *Client {
 	opts := &redis.Options{
-		Addr:         cfg.Addr,
-		Password:     cfg.Password,
-		DB:           cfg.DB,
-		PoolSize:     cfg.PoolSize,
-		MinIdleConns: cfg.MinIdle,
-		MaxRetries:   cfg.MaxRetries,
-		DialTimeout:  cfg.DialTimeout,
-		ReadTimeout:  cfg.ReadTimeout,
-		WriteTimeout: cfg.WriteTimeout,
+		Addr:                  cfg.Addr,
+		Password:              cfg.Password,
+		DB:                    cfg.DB,
+		PoolSize:              cfg.PoolSize,
+		MinIdleConns:          cfg.MinIdle,
+		MaxRetries:            cfg.MaxRetries,
+		DialTimeout:           cfg.DialTimeout,
+		ReadTimeout:           cfg.ReadTimeout,
+		WriteTimeout:          cfg.WriteTimeout,
+		ContextTimeoutEnabled: true,
 	}
 
 	if cfg.TLS {
@@ -57,14 +71,6 @@ func NewClient(cfg Config) (*Client, error) {
 	}
 
 	rdb := redis.NewClient(opts)
-
-	// 验证连接
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		rdb.Close()
-		return nil, fmt.Errorf("redis ping failed: %w", err)
-	}
 
 	prefix := cfg.KeyPrefix
 	if prefix == "" {
@@ -74,7 +80,7 @@ func NewClient(cfg Config) (*Client, error) {
 	return &Client{
 		rdb:    rdb,
 		prefix: prefix,
-	}, nil
+	}
 }
 
 // NewClientSimple 简化版构造函数（兼容旧代码）

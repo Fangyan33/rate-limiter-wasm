@@ -3,7 +3,6 @@ package plugin
 import (
 	"encoding/json"
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
@@ -38,6 +37,10 @@ type rootContext struct {
 	now              func() time.Time
 	dispatchHTTPCall httpCallDispatcher
 	setTickPeriod    func(uint32) error
+	contextID        uint32
+	pendingAcquires  map[uint32]*httpContext
+	resumeRequest    func() error
+	sendResponse     func(uint32, [][2]string, []byte, int32) error
 }
 
 type httpContext struct {
@@ -48,6 +51,9 @@ type httpContext struct {
 	distributedLeaseID string
 	counterService     config.CounterServiceConfig
 	acquireStartedAt   time.Time
+	contextID          uint32
+	acquirePending     bool
+	acquireDeadline    time.Time
 }
 
 func NewVMContext() types.VMContext {
@@ -59,19 +65,23 @@ func NewRootContext() *rootContext {
 }
 
 func (*vmContext) NewPluginContext(contextID uint32) types.PluginContext {
-	return &rootContext{}
+	return &rootContext{contextID: contextID}
 }
 
-func (r *rootContext) OnPluginStart(pluginConfigurationSize int) types.OnPluginStartStatus {
+func (r *rootContext) OnPluginStart(pluginConfigurationSize int) (status types.OnPluginStartStatus) {
+	// Returning failure here can reject xDS or prevent proxy startup even with fail_open.
+	status = types.OnPluginStartStatusOK
+	defer r.recoverRoot("initialize")
 	data, err := proxywasm.GetPluginConfiguration()
 	if err != nil {
-		proxywasm.LogCriticalf("read plugin configuration: %v", err)
-		return types.OnPluginStartStatusFailed
+		r.disable()
+		safeLogCriticalf("read plugin configuration: %v; rate limiting disabled", err)
+		return status
 	}
 
 	if err := r.LoadConfiguration(data); err != nil {
-		proxywasm.LogCriticalf("parse plugin configuration: %v", err)
-		return types.OnPluginStartStatusFailed
+		safeLogCriticalf("parse plugin configuration: %v; rate limiting disabled", err)
+		return status
 	}
 	r.started = true
 	r.configureRenewalTimer()
@@ -80,6 +90,12 @@ func (r *rootContext) OnPluginStart(pluginConfigurationSize int) types.OnPluginS
 }
 
 func (r *rootContext) LoadConfiguration(data []byte) error {
+	valid := false
+	defer func() {
+		if !valid {
+			r.disable()
+		}
+	}()
 	cfg, err := config.Parse(data)
 	if err != nil {
 		return fmt.Errorf("load configuration: %w", err)
@@ -102,7 +118,22 @@ func (r *rootContext) LoadConfiguration(data []byte) error {
 	if r.started {
 		r.configureRenewalTimer()
 	}
+	valid = true
 	return nil
+}
+
+func (r *rootContext) disable() {
+	r.cfg = config.Config{}
+	r.matcher = nil
+	r.limiter = nil
+	r.asyncDistributed = false
+}
+
+func (r *rootContext) recoverRoot(operation string) {
+	if recovered := recover(); recovered != nil {
+		r.disable()
+		safeLogCriticalf("%s panic: %v; rate limiting disabled", operation, recovered)
+	}
 }
 
 func buildLimits(rateLimits []config.RateLimit) map[string]int {
@@ -118,10 +149,17 @@ func (r *rootContext) Config() config.Config {
 }
 
 func (r *rootContext) NewHttpContext(contextID uint32) types.HttpContext {
-	return &httpContext{root: r}
+	return &httpContext{root: r, contextID: contextID}
 }
 
-func (h *httpContext) OnHttpRequestHeaders(numHeaders int, endOfStream bool) types.Action {
+func (h *httpContext) OnHttpRequestHeaders(numHeaders int, endOfStream bool) (action types.Action) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			h.clearPendingAcquire()
+			safeLogCriticalf("request headers panic: %v; failing open", recovered)
+			action = types.ActionContinue
+		}
+	}()
 	if h.root == nil || h.root.matcher == nil || h.root.limiter == nil {
 		return types.ActionContinue
 	}
@@ -169,9 +207,18 @@ func (h *httpContext) dispatchAcquire(domain, apiKey string) types.Action {
 		TTLMS:  int64(cs.LeaseTTLMS),
 	})
 
-	timeout := uint32(cs.TimeoutMS)
-	if timeout == 0 {
-		timeout = 5000
+	timeout := calloutTimeout(cs.TimeoutMS)
+	// An independent root timer also resumes streams if a callout callback is lost.
+	h.acquireDeadline = h.acquireStartedAt.Add(time.Duration(timeout) * time.Millisecond)
+	h.acquirePending = true
+	if h.root.pendingAcquires == nil {
+		h.root.pendingAcquires = make(map[uint32]*httpContext)
+	}
+	h.root.pendingAcquires[h.contextID] = h
+	h.root.configureRenewalTimer()
+	if !h.root.renewalReady {
+		h.clearPendingAcquire()
+		return types.ActionContinue
 	}
 
 	_, err := h.root.dispatchCall(
@@ -188,6 +235,7 @@ func (h *httpContext) dispatchAcquire(domain, apiKey string) types.Action {
 		h.onAcquireResponse,
 	)
 	if err != nil {
+		h.clearPendingAcquire()
 		proxywasm.LogErrorf("dispatch acquire callout: %v", err)
 		return types.ActionContinue
 	}
@@ -196,6 +244,12 @@ func (h *httpContext) dispatchAcquire(domain, apiKey string) types.Action {
 }
 
 func (h *httpContext) OnHttpStreamDone() {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			safeLogCriticalf("release panic: %v; business response remains unchanged", recovered)
+		}
+	}()
+	h.clearPendingAcquire()
 	if h.release != nil {
 		h.release()
 		h.release = nil
@@ -215,10 +269,7 @@ func (h *httpContext) OnHttpStreamDone() {
 		LeaseID: h.distributedLeaseID,
 	})
 
-	timeout := uint32(cs.TimeoutMS)
-	if timeout == 0 {
-		timeout = 5000
-	}
+	timeout := calloutTimeout(cs.TimeoutMS)
 
 	_, err := h.root.dispatchCall(
 		cs.Cluster,
@@ -241,6 +292,20 @@ func (h *httpContext) OnHttpStreamDone() {
 }
 
 func (h *httpContext) onAcquireResponse(numHeaders, bodySize, numTrailers int) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			safeLogCriticalf("acquire callback panic: %v; failing open", recovered)
+			h.resumeAfterFailedOpen()
+		}
+	}()
+	// A watchdog may already have resumed this request. A late denial must not reject it.
+	if !h.acquirePending {
+		return
+	}
+	if !h.root.currentTime().Before(h.acquireDeadline) {
+		h.resumeAfterFailedOpen()
+		return
+	}
 	headers, err := proxywasm.GetHttpCallResponseHeaders()
 	if err != nil {
 		proxywasm.LogErrorf("read acquire response headers: %v", err)
@@ -262,7 +327,12 @@ func (h *httpContext) onAcquireResponse(numHeaders, bodySize, numTrailers int) {
 		return
 	}
 
-	body, err := proxywasm.GetHttpCallResponseBody(0, math.MaxInt32)
+	if bodySize <= 0 || bodySize > 64*1024 {
+		proxywasm.LogWarn("invalid acquire response size; failing open")
+		h.resumeAfterFailedOpen()
+		return
+	}
+	body, err := proxywasm.GetHttpCallResponseBody(0, bodySize)
 	if err != nil {
 		proxywasm.LogErrorf("read acquire response body: %v", err)
 		h.resumeAfterFailedOpen()
@@ -270,7 +340,7 @@ func (h *httpContext) onAcquireResponse(numHeaders, bodySize, numTrailers int) {
 	}
 
 	var resp struct {
-		Allowed bool   `json:"allowed"`
+		Allowed *bool  `json:"allowed"`
 		LeaseID string `json:"lease_id,omitempty"`
 		Reason  string `json:"reason,omitempty"`
 		Message string `json:"message,omitempty"`
@@ -280,10 +350,26 @@ func (h *httpContext) onAcquireResponse(numHeaders, bodySize, numTrailers int) {
 		h.resumeAfterFailedOpen()
 		return
 	}
+	if resp.Allowed == nil {
+		proxywasm.LogWarn("acquire response missing boolean allowed; failing open")
+		h.resumeAfterFailedOpen()
+		return
+	}
 
-	if !resp.Allowed {
+	if !*resp.Allowed {
+		switch resp.Reason {
+		case "limit_exceeded", "config_not_found", "api_key_disabled":
+		default:
+			proxywasm.LogWarnf("invalid acquire denial: reason=%s; failing open", resp.Reason)
+			h.resumeAfterFailedOpen()
+			return
+		}
 		proxywasm.LogWarnf("counter service denied: reason=%s message=%s", resp.Reason, resp.Message)
-		h.reject()
+		if h.reject() == types.ActionContinue {
+			h.resumeAfterFailedOpen()
+		} else {
+			h.clearPendingAcquire()
+		}
 		return
 	}
 
@@ -293,14 +379,35 @@ func (h *httpContext) onAcquireResponse(numHeaders, bodySize, numTrailers int) {
 	} else {
 		proxywasm.LogWarn("acquire succeeded without lease_id; failing open without renewal")
 	}
-	if err := proxywasm.ResumeHttpRequest(); err != nil {
-		proxywasm.LogErrorf("resume http request: %v", err)
-	}
+	h.resumeAfterFailedOpen()
 }
 
 func (h *httpContext) resumeAfterFailedOpen() {
-	if err := proxywasm.ResumeHttpRequest(); err != nil {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			safeLogCriticalf("resume request panic: %v; watchdog will retry", recovered)
+		}
+	}()
+	resume := proxywasm.ResumeHttpRequest
+	if h.root != nil && h.root.resumeRequest != nil {
+		resume = h.root.resumeRequest
+	}
+	if err := resume(); err != nil {
 		proxywasm.LogErrorf("resume http request after failed-open acquire: %v", err)
+		return // Leave it pending so the root watchdog can retry.
+	}
+	h.clearPendingAcquire()
+}
+
+func (h *httpContext) clearPendingAcquire() {
+	wasPending := h.acquirePending
+	h.acquirePending = false
+	if h.root != nil {
+		defer h.root.recoverRoot("clear acquire")
+		delete(h.root.pendingAcquires, h.contextID)
+		if wasPending {
+			h.root.configureRenewalTimer()
+		}
 	}
 }
 
@@ -316,7 +423,11 @@ func (h *httpContext) reject() (action types.Action) {
 		}
 	}()
 
-	if err := proxywasm.SendHttpResponse(
+	send := proxywasm.SendHttpResponse
+	if h.root.sendResponse != nil {
+		send = h.root.sendResponse
+	}
+	if err := send(
 		uint32(h.root.cfg.ErrorResponse.StatusCode),
 		[][2]string{{"content-type", "text/plain; charset=utf-8"}},
 		[]byte(h.root.cfg.ErrorResponse.Message),
@@ -333,6 +444,13 @@ func safeLogCriticalf(format string, args ...any) {
 		_ = recover()
 	}()
 	proxywasm.LogCriticalf(format, args...)
+}
+
+func calloutTimeout(configuredMS int) uint32 {
+	if configuredMS <= 0 || configuredMS > 5000 {
+		return 5000
+	}
+	return uint32(configuredMS)
 }
 
 func normalizeHost(host string) string {

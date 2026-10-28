@@ -1,0 +1,7 @@
+# 构建上下文由 Makefile 指向本次生成的制品目录。
+FROM alpine:latest
+RUN apk --no-cache add ca-certificates
+WORKDIR /root/
+COPY counter-service rate-limiter.wasm token-stats.wasm ./
+EXPOSE 8080
+CMD ["./counter-service"]

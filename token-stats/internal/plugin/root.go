@@ -35,6 +35,7 @@ type httpContext struct {
 	root *rootContext
 
 	tokenStatsEnabled bool
+	injectUsage       bool
 	domain            string
 	uid               string
 
@@ -43,7 +44,11 @@ type httpContext struct {
 	streamParseErrors   int
 	responseContentType string
 	sseBuf              []byte
+	jsonBuf             []byte
+	responseSkipped     bool
 }
+
+const maxStatisticsBodyBytes = 1024 * 1024
 
 func NewVMContext() types.VMContext {
 	return &vmContext{}
@@ -57,22 +62,36 @@ func (*vmContext) NewPluginContext(contextID uint32) types.PluginContext {
 	return &rootContext{}
 }
 
-func (r *rootContext) OnPluginStart(pluginConfigurationSize int) types.OnPluginStartStatus {
+func (r *rootContext) OnPluginStart(pluginConfigurationSize int) (status types.OnPluginStartStatus) {
+	status = types.OnPluginStartStatusOK
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			r.disable()
+			safeLogCriticalf("initialize panic: %v; token statistics disabled", recovered)
+		}
+	}()
 	data, err := proxywasm.GetPluginConfiguration()
 	if err != nil {
-		proxywasm.LogCriticalf("read plugin configuration: %v", err)
-		return types.OnPluginStartStatusFailed
+		r.disable()
+		safeLogCriticalf("read plugin configuration: %v; token statistics disabled", err)
+		return status
 	}
 
 	if err := r.LoadConfiguration(data); err != nil {
-		proxywasm.LogCriticalf("parse plugin configuration: %v", err)
-		return types.OnPluginStartStatusFailed
+		safeLogCriticalf("parse plugin configuration: %v; token statistics disabled", err)
+		return status
 	}
 
 	return types.OnPluginStartStatusOK
 }
 
 func (r *rootContext) LoadConfiguration(data []byte) error {
+	valid := false
+	defer func() {
+		if !valid {
+			r.disable()
+		}
+	}()
 	cfg, err := config.Parse(data)
 	if err != nil {
 		return fmt.Errorf("load configuration: %w", err)
@@ -91,7 +110,27 @@ func (r *rootContext) LoadConfiguration(data []byte) error {
 	r.metricKeys = make(map[string]struct{})
 	r.metricKeyCount = 0
 	r.metricKeyLimit = cfg.TokenStatistics.MetricKeyLimit
+	valid = true
 	return nil
+}
+
+func (r *rootContext) disable() {
+	r.cfg = config.Config{}
+	r.matcher = nil
+}
+
+func safeLogCriticalf(format string, args ...any) {
+	defer func() { _ = recover() }()
+	proxywasm.LogCriticalf(format, args...)
+}
+
+func (h *httpContext) recoverStream() {
+	if recovered := recover(); recovered != nil {
+		h.tokenStatsEnabled = false
+		h.sseBuf = nil
+		h.jsonBuf = nil
+		safeLogCriticalf("token statistics panic: %v; business stream continues", recovered)
+	}
 }
 
 func (r *rootContext) Config() config.Config {
@@ -102,7 +141,8 @@ func (r *rootContext) NewHttpContext(contextID uint32) types.HttpContext {
 	return &httpContext{root: r}
 }
 
-func (h *httpContext) OnHttpRequestHeaders(numHeaders int, endOfStream bool) types.Action {
+func (h *httpContext) OnHttpRequestHeaders(numHeaders int, endOfStream bool) (action types.Action) {
+	defer h.recoverStream()
 	if h.root == nil || h.root.matcher == nil {
 		return types.ActionContinue
 	}
@@ -139,21 +179,27 @@ func (h *httpContext) OnHttpRequestHeaders(numHeaders int, endOfStream bool) typ
 	h.uid = uid
 
 	if h.root.cfg.TokenStatistics.InjectStreamUsage {
-		_ = proxywasm.RemoveHttpRequestHeader("content-length")
+		if err := proxywasm.RemoveHttpRequestHeader("content-length"); err == nil {
+			h.injectUsage = true
+		}
 	}
 
 	return types.ActionContinue
 }
 
-func (h *httpContext) OnHttpRequestBody(bodySize int, endOfStream bool) types.Action {
+func (h *httpContext) OnHttpRequestBody(bodySize int, endOfStream bool) (action types.Action) {
+	defer h.recoverStream()
 	if h.root == nil {
 		return types.ActionContinue
 	}
 	cfg := h.root.cfg
-	if !cfg.TokenStatistics.Enabled || !cfg.TokenStatistics.InjectStreamUsage || !h.tokenStatsEnabled {
+	if !cfg.TokenStatistics.Enabled || !h.injectUsage || !h.tokenStatsEnabled {
 		return types.ActionContinue
 	}
 	if !endOfStream {
+		return types.ActionContinue
+	}
+	if bodySize > maxStatisticsBodyBytes {
 		return types.ActionContinue
 	}
 
@@ -197,7 +243,8 @@ func (h *httpContext) OnHttpRequestBody(bodySize int, endOfStream bool) types.Ac
 	return types.ActionContinue
 }
 
-func (h *httpContext) OnHttpResponseHeaders(numHeaders int, endOfStream bool) types.Action {
+func (h *httpContext) OnHttpResponseHeaders(numHeaders int, endOfStream bool) (action types.Action) {
+	defer h.recoverStream()
 	if h.root == nil || !h.root.cfg.TokenStatistics.Enabled || !h.tokenStatsEnabled {
 		return types.ActionContinue
 	}
@@ -208,21 +255,38 @@ func (h *httpContext) OnHttpResponseHeaders(numHeaders int, endOfStream bool) ty
 	return types.ActionContinue
 }
 
-func (h *httpContext) OnHttpResponseBody(bodySize int, endOfStream bool) types.Action {
+func (h *httpContext) OnHttpResponseBody(bodySize int, endOfStream bool) (action types.Action) {
+	defer h.recoverStream()
 	if h.root == nil || !h.root.cfg.TokenStatistics.Enabled || !h.tokenStatsEnabled {
 		return types.ActionContinue
 	}
 
 	if !isEventStream(h.responseContentType) {
-		if !endOfStream {
-			return types.ActionPause
+		if h.responseSkipped {
+			return types.ActionContinue
 		}
-		body, err := proxywasm.GetHttpResponseBody(0, bodySize)
-		if err != nil {
+		if bodySize > maxStatisticsBodyBytes-len(h.jsonBuf) {
+			h.responseSkipped = true
+			h.jsonBuf = nil
 			h.streamParseErrors++
 			return types.ActionContinue
 		}
-		prompt, completion, status := parseUsageFromJSON(body)
+		if bodySize > 0 {
+			chunk, err := proxywasm.GetHttpResponseBody(0, bodySize)
+			if err != nil {
+				h.responseSkipped = true
+				h.jsonBuf = nil
+				h.streamParseErrors++
+				return types.ActionContinue
+			}
+			h.jsonBuf = append(h.jsonBuf, chunk...)
+		}
+		// Keep a bounded private copy; never pause business responses to collect usage.
+		if !endOfStream {
+			return types.ActionContinue
+		}
+		prompt, completion, status := parseUsageFromJSON(h.jsonBuf)
+		h.jsonBuf = nil
 		switch status {
 		case usageParseInvalidJSON:
 			h.streamParseErrors++
@@ -235,6 +299,15 @@ func (h *httpContext) OnHttpResponseBody(bodySize int, endOfStream bool) types.A
 		return types.ActionContinue
 	}
 
+	// 流结束或分片之间可能只有空回调，此时 SDK 没有可读取的 body。
+	if bodySize == 0 {
+		return types.ActionContinue
+	}
+	if bodySize > maxStatisticsBodyBytes {
+		h.tokenStatsEnabled = false
+		h.sseBuf = nil
+		return types.ActionContinue
+	}
 	chunk, err := proxywasm.GetHttpResponseBody(0, bodySize)
 	if err != nil {
 		h.streamParseErrors++
@@ -245,6 +318,7 @@ func (h *httpContext) OnHttpResponseBody(bodySize int, endOfStream bool) types.A
 }
 
 func (h *httpContext) OnHttpStreamDone() {
+	defer h.recoverStream()
 	if h.root != nil && h.root.cfg.TokenStatistics.Enabled && h.tokenStatsEnabled {
 		h.updateTokenMetrics()
 	}

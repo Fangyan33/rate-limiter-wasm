@@ -36,7 +36,10 @@ type renewalTestVM struct {
 	root *rootContext
 }
 
-func (vm *renewalTestVM) NewPluginContext(uint32) types.PluginContext { return vm.root }
+func (vm *renewalTestVM) NewPluginContext(id uint32) types.PluginContext {
+	vm.root.contextID = id
+	return vm.root
+}
 
 func newRenewalHost(t *testing.T, prepare func(*rootContext)) (*rootContext, proxytest.HostEmulator, *time.Time) {
 	t.Helper()
@@ -166,8 +169,8 @@ func TestDelayedAcquireReschedulesRenewalAfterConfigUpdate(t *testing.T) {
 		config     string
 		tickPeriod uint32
 	}{
-		{"longer TTL", renewalTestConfig, 1000},
-		{"distributed disabled", "domains: [api.example.com]\nrate_limits:\n  - api_key: key001\n    max_concurrent: 1\n", 0},
+		{"longer TTL", renewalTestConfig, 100},
+		{"distributed disabled", "domains: [api.example.com]\nrate_limits:\n  - api_key: key001\n    max_concurrent: 1\n", 100},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, host, now := newRenewalHost(t, nil)

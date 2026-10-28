@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/alicebob/miniredis/v2/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -121,6 +122,35 @@ func TestListConfigs(t *testing.T) {
 	// 测试分页（模拟 cursor）
 	// miniredis SCAN 支持有限，这里简单验证 cursor 格式
 	assert.NotEmpty(t, result.Cursor)
+}
+
+func TestListConfigs_EmptyPage(t *testing.T) {
+	s, client := setupConfigTest(t)
+	// SCAN 可以遍历到与 pattern 不匹配的键，并返回空配置页。
+	s.Set("unrelated", "value")
+	result, err := client.ListConfigs(context.Background(), "rl:config:*", 0, 100)
+	require.NoError(t, err)
+	assert.Equal(t, "0", result.Cursor)
+	assert.NotNil(t, result.Configs)
+	assert.Empty(t, result.Configs)
+}
+
+func TestListConfigs_RedisEmptyObjectPage(t *testing.T) {
+	s, client := setupConfigTest(t)
+	// 真实 Redis cjson 将空 Lua table 编码为 {}，miniredis 则编码为 []。
+	// 空页也可能有非零 cursor，调用方必须能够继续遍历。
+	s.Server().SetPreHook(func(peer *server.Peer, command string, _ ...string) bool {
+		if command != "EVAL" {
+			return false
+		}
+		peer.WriteBulk(`{"cursor":"17","configs":{}}`)
+		return true
+	})
+	result, err := client.ListConfigs(context.Background(), "rl:config:*", 0, 2)
+	require.NoError(t, err)
+	assert.Equal(t, "17", result.Cursor)
+	assert.NotNil(t, result.Configs)
+	assert.Empty(t, result.Configs)
 }
 
 func TestSetConfig_ValidationFail(t *testing.T) {

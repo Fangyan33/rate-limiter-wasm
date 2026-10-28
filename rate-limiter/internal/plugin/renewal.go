@@ -8,6 +8,7 @@ import (
 	"rate-limiter-wasm/rate-limiter/internal/config"
 
 	"github.com/tetratelabs/proxy-wasm-go-sdk/proxywasm"
+	proxywasmtypes "github.com/tetratelabs/proxy-wasm-go-sdk/proxywasm/types"
 )
 
 type httpCallDispatcher func(string, [][2]string, []byte, [][2]string, uint32, func(int, int, int)) (uint32, error)
@@ -43,7 +44,10 @@ func renewalInterval(ttlMS int) time.Duration {
 
 func (r *rootContext) configureRenewalTimer() {
 	period := time.Second
-	needed := r.asyncDistributed || len(r.activeLeases) > 0
+	needed := r.asyncDistributed || len(r.activeLeases) > 0 || len(r.pendingAcquires) > 0
+	if len(r.pendingAcquires) > 0 {
+		period = 100 * time.Millisecond
+	}
 	if r.asyncDistributed {
 		if interval := renewalInterval(r.counterService.LeaseTTLMS); interval < period {
 			period = interval
@@ -91,8 +95,14 @@ func (r *rootContext) trackLease(id string, cs config.CounterServiceConfig, star
 }
 
 func (r *rootContext) OnTick() {
-	r.configureRenewalTimer()
+	defer r.recoverRoot("timer")
 	now := r.currentTime()
+	for _, pending := range r.pendingAcquires {
+		if !now.Before(pending.acquireDeadline) {
+			r.resumePendingAcquire(pending)
+		}
+	}
+	r.configureRenewalTimer()
 	for id, lease := range r.activeLeases {
 		if !now.Before(lease.expiresAt) {
 			r.loseLease(id, "lease expired before renewal was confirmed")
@@ -105,12 +115,25 @@ func (r *rootContext) OnTick() {
 	}
 }
 
+func (r *rootContext) resumePendingAcquire(h *httpContext) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			safeLogCriticalf("acquire watchdog panic: %v; will retry", recovered)
+		}
+	}()
+	if err := proxywasm.SetEffectiveContext(h.contextID); err != nil {
+		if err == proxywasmtypes.ErrorStatusNotFound {
+			h.clearPendingAcquire()
+		}
+		return
+	}
+	defer func() { _ = proxywasm.SetEffectiveContext(r.contextID) }()
+	h.resumeAfterFailedOpen()
+}
+
 func (r *rootContext) dispatchRenew(id string, lease *activeLease, startedAt time.Time) {
 	interval := renewalInterval(lease.config.LeaseTTLMS)
-	timeoutMS := int64(lease.config.TimeoutMS)
-	if timeoutMS == 0 {
-		timeoutMS = 5000
-	}
+	timeoutMS := int64(calloutTimeout(lease.config.TimeoutMS))
 	if limit := interval.Milliseconds(); timeoutMS > limit {
 		timeoutMS = limit
 	}
@@ -145,6 +168,7 @@ func (r *rootContext) dispatchRenew(id string, lease *activeLease, startedAt tim
 }
 
 func (r *rootContext) onRenewResponse(id string, lease *activeLease, startedAt time.Time) {
+	defer r.recoverRoot("renew callback")
 	// A stream may have finished while the root-context callout was in flight.
 	if r.activeLeases[id] != lease {
 		return
@@ -170,8 +194,9 @@ func (r *rootContext) onRenewResponse(id string, lease *activeLease, startedAt t
 		proxywasm.LogWarnf("lease renewal returned status %s; keeping business request open", status)
 		return
 	}
-	body, err := proxywasm.GetHttpCallResponseBody(0, math.MaxInt32)
-	if err != nil {
+	// Read at most one byte beyond the accepted response size.
+	body, err := proxywasm.GetHttpCallResponseBody(0, 64*1024+1)
+	if err != nil || len(body) > 64*1024 {
 		proxywasm.LogWarnf("read lease renewal body: %v", err)
 		return
 	}

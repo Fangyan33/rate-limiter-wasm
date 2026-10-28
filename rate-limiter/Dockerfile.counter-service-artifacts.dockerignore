@@ -1,0 +1,4 @@
+*
+!counter-service
+!rate-limiter.wasm
+!token-stats.wasm

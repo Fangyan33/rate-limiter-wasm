@@ -1,13 +1,17 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"rate-limiter-wasm/rate-limiter/internal/counter-service/models"
 	"rate-limiter-wasm/rate-limiter/internal/counter-service/redis"
 )
+
+const acquireTimeout = 500 * time.Millisecond
 
 // AcquireHandler 处理 POST /acquire 请求
 type AcquireHandler struct {
@@ -37,9 +41,12 @@ func (h *AcquireHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.redisClient.Acquire(r.Context(), req)
+	// 所有连接等待、命令执行和重试共用一个预算，预留 HTTP 响应时间。
+	ctx, cancel := context.WithTimeout(r.Context(), acquireTimeout)
+	defer cancel()
+	result, err := h.redisClient.Acquire(ctx, req)
 	if err != nil {
-		status := http.StatusOK
+		status := http.StatusInternalServerError
 		reason := "internal_error"
 
 		switch {
@@ -47,10 +54,13 @@ func (h *AcquireHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusServiceUnavailable
 			reason = "redis_unavailable"
 		case errors.Is(err, redis.ErrConfigNotFound):
+			status = http.StatusOK
 			reason = "config_not_found"
 		case errors.Is(err, redis.ErrAPIKeyDisabled):
+			status = http.StatusOK
 			reason = "api_key_disabled"
 		case errors.Is(err, redis.ErrLimitExceeded):
+			status = http.StatusOK
 			reason = "limit_exceeded"
 		case errors.Is(err, redis.ErrInvalidConfig):
 			reason = "invalid_config"

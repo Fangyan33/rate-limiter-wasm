@@ -126,7 +126,7 @@ error_response:
 2. 父域名通配：`rl:config:*.example.com:<sha256(key001)>`
 3. 全局通配：`rl:config:*:<sha256(key001)>`
 
-域名通配规则也优先于精确域名的具体 key 规则。命中规则若被禁用、阈值无效或并发已满，直接拒绝，不再回退；禁用规则仍沿用 `api_key_disabled` 拒绝原因。通配符只查当前父域（例如 `a.b.example.com` 查 `*.b.example.com`）和全局 `*`，计数按实际请求域名隔离，不同子域名不会共享额度。插件的 `domains` 仍决定哪些请求进入限流。
+域名通配规则也优先于精确域名的具体 key 规则。命中规则若被禁用或并发已满，直接拒绝，不再回退；禁用规则仍沿用 `api_key_disabled` 拒绝原因。阈值无效属于配置故障，Counter Service 返回 500，网关放行，不回退到其他规则。通配符只查当前父域（例如 `a.b.example.com` 查 `*.b.example.com`）和全局 `*`，计数按实际请求域名隔离，不同子域名不会共享额度。插件的 `domains` 仍决定哪些请求进入限流。
 
 #### 仅按域名限流
 
@@ -193,7 +193,7 @@ curl "http://counter-service:8080/config?domain=llm-demo.local&api_key=key_basic
 curl "http://counter-service:8080/configs?cursor=0&limit=100"
 ```
 
-`/configs` 返回 `cursor` 和当前页的 `configs`。将返回的 `cursor` 作为下一次请求的参数，直到返回 `"0"` 才表示本轮遍历结束；一页不足以代表全部配置。列表不会返回明文 `api_key`，只返回 `api_key_hash`。
+`/configs` 返回 `cursor` 和当前页的 `configs`。将返回的 `cursor` 作为下一次请求的参数，直到返回 `"0"` 才表示本轮遍历结束；一页不足以代表全部配置。空页返回 `configs: []`，仍需根据 `cursor` 判断是否继续。列表不会返回明文 `api_key`，只返回 `api_key_hash`。
 
 **删除配置：**
 
@@ -271,6 +271,8 @@ Content-Type: application/json
   "message": "redis unavailable"
 }
 ```
+
+输入校验通过后，`/acquire` 的 Redis 操作共用 500ms 总时限，包含连接等待、命令执行和重试；调用方已有更早截止时间时，以更早时间为准。Redis 网络故障或操作超时返回上述 503。插件收到非 200 时仍按 fail-open 继续转发，用户收到业务上游的实际响应，不会直接收到这个内部 503。
 
 **Release 请求：**
 
@@ -596,9 +598,25 @@ done
 
 ### 降级行为
 
-当 Counter Service 调用失败、超时、返回非 `200`，或返回体无法解析时，插件当前行为是 **fail-open 放行当前请求**，不会切回本地限流。缺少或格式错误的 Bearer 凭证也采用相同策略；服务正常时仍必须匹配限流规则才能通过。
+限流和统计链路采用 **fail-open**：组件故障时跳过相关功能，继续转发业务请求，不把插件或后端的内部错误转换成业务 503/429，也不切回本地限流。业务上游自身的状态码和响应保持原样。
 
-当 Counter Service 返回 `HTTP 200` 且 `allowed=false` 时，插件会按 `error_response` 配置直接拒绝请求。
+| 故障位置 | 网关行为 |
+| --- | --- |
+| Wasm 下载 Cluster 不存在、连接失败、超时、非 200、摘要不一致 | 两个插件通过 ECDS 独立加载；监听器不等待插件，先使用内置 Lua 透传默认配置 |
+| Wasm 无法编译、运行时不可用或扩展初始化配置被拒绝 | 保留可用的 ECDS 配置；首次加载失败时使用透传默认配置，不因扩展失败阻塞监听器 |
+| Wasm VM 运行异常或 trap | 两个插件均设置 `fail_open: true`，由 Envoy 跳过失效插件 |
+| 插件业务配置读取、解析、校验失败 | 初始化返回成功并禁用插件功能，避免配置错误阻止代理启动；更正配置后恢复 |
+| acquire 发起失败、非 200、超时、空体、非法 JSON、缺少布尔 `allowed`、未知拒绝原因、响应超过 64KiB | 继续请求；不创建本地兜底限流规则 |
+| acquire 回调丢失或恢复请求临时失败 | 根定时器检查暂停中的请求，截止后尝试恢复；已放行请求忽略迟到的拒绝结果 |
+| Redis 网络、认证、脚本或配置损坏 | Counter Service 返回内部 5xx；网关放行。HTTP/Wasm 下载服务启动不依赖 Redis 可用 |
+| renew/release 失败、超时或异常响应 | 不修改、中断业务响应；失效租约依靠 TTL 回收 |
+| usage 注入、JSON/SSE 解析、指标写入失败 | 跳过对应统计或注入，继续业务流；JSON 响应不暂停转发，只保留最多 1MiB 的统计副本 |
+
+两个 ECDS 扩展同时设置 `vm_config.nack_on_code_cache_miss: true`。Istio Agent 无法下载模块时，可能把原始远程配置交给 Envoy；此时必须拒绝未缓存的扩展并保留透传默认配置，不能向请求发布尚未初始化的 Wasm 工厂。这个设置与 ECDS 隔离配合使用，不能直接套到原来内联在监听器中的 Wasm 配置上。
+
+只有 `HTTP 200 + allowed=false` 且原因是 `limit_exceeded`、`api_key_disabled` 或 `config_not_found` 的明确策略拒绝，才按 `error_response` 拒绝请求。缺少或格式错误的 Bearer 凭证也走相同故障放行路径；服务正常时仍须匹配限流规则。非法配置、内部错误或不完整响应不能冒充有效策略拒绝。
+
+acquire 的等待时间采用 `timeout_ms`，未设置或超过 5000ms 时使用 5000ms；暂停期间的看门狗周期最多 100ms，恢复仍取决于 Envoy 事件循环正常运行。该机制覆盖插件链路故障；代理进程退出、宿主机故障或业务上游不可用，需要由网关高可用和业务重试处理。EnvoyFilter 自身的 YAML/Protobuf 错误也必须在发布前检查，不能靠插件代码兜底。
 
 续约发起失败、超时、非 200 或响应不可解析时，插件保持业务请求继续，在租约有效期内按后续周期重试；同一租约最多有一个未完成的续约调用。确认租约不存在或超过保守有效期后停止续约并记录 `lease renewal stopped` 告警，不重新 acquire，也不中断业务请求。因此，持续后端故障或调度延迟超过 TTL 时，允许暂时突破并发上限。插件定时器初始化失败时记录错误并对分布式请求 fail-open，避免获取无法维护的租约。
 
@@ -717,7 +735,7 @@ JWT 格式错误、缺少 `uid` 或 `uid` 不合法时，该请求仍继续转�
 
 1. Kubernetes 集群已安装 Istio，目标网关的标签与 EnvoyFilter selector 一致。
 2. 已构建 WASM 模块：`bash ./build.sh`。
-3. 已发布包含最新 `token-stats.wasm` 的 Counter Service 镜像及服务，使网关可下载 `http://counter-service.default.svc.cluster.local:8080/wasm/token-stats.wasm`。当前下载服务启动依赖 Redis，因此也需完成 Redis 和 Counter Service 部署。
+3. 已发布包含最新 `token-stats.wasm` 的 Counter Service 镜像及服务，使网关可下载 `http://counter-service.default.svc.cluster.local:8080/wasm/token-stats.wasm`。下载服务可以在 Redis 不可用时启动；限流依赖 Redis，后端故障时网关放行。
 4. 网关中已存在名为 `counter-service` 的 Envoy 集群。当前它由 `rate-limiter-envoyfilter.yaml` 的 CLUSTER patch 创建，Token EnvoyFilter 本身不创建该集群。使用随附清单时需先应用限流 EnvoyFilter；如果只启用 Token 插件，需单独提供等效的下载集群并确认可达，不能只 apply Token EnvoyFilter。
 5. 为 Prometheus 指标启用 `domain/uid` labels 时，按后文说明合并 mesh config 的 `extraStatTags`。
 

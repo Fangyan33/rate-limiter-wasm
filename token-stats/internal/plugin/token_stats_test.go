@@ -135,8 +135,8 @@ error_response:
 	host.CallOnResponseHeaders(contextID, [][2]string{{"content-type", "application/json"}}, false)
 
 	action = host.CallOnResponseBody(contextID, []byte(`{"usage":{"prompt_tokens":10,`), false)
-	if action != types.ActionPause {
-		t.Fatalf("expected first non-SSE chunk to pause for buffering, got %v", action)
+	if action != types.ActionContinue {
+		t.Fatalf("expected first non-SSE chunk to continue without buffering business traffic, got %v", action)
 	}
 
 	action = host.CallOnResponseBody(contextID, []byte(`"completion_tokens":20}}`), true)

@@ -27,34 +27,31 @@ spec:
                         socket_address:
                           address: counter-service.default.svc.cluster.local
                           port_value: 8080
-    - applyTo: HTTP_FILTER
+    - applyTo: EXTENSION_CONFIG
       match:
         context: GATEWAY
-        listener:
-          filterChain:
-            filter:
-              name: envoy.filters.network.http_connection_manager
-              subFilter:
-                name: envoy.filters.http.router
       patch:
-        operation: INSERT_BEFORE
+        operation: ADD
         value:
-          name: envoy.filters.http.wasm
+          name: rate-limiter-wasm
           typed_config:
             "@type": type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
             config:
               name: rate-limiter-wasm
               root_id: rate-limiter-root
+              fail_open: true
               vm_config:
                 vm_id: rate-limiter-vm
                 runtime: envoy.wasm.runtime.v8
+                # ECDS 使用透传默认配置；禁止向请求暴露尚未下载完成的 VM。
+                nack_on_code_cache_miss: true
                 code:
                   remote:
                     http_uri:
                       uri: http://counter-service.default.svc.cluster.local:8080/wasm/rate-limiter.wasm
                       cluster: counter-service
                       timeout: 10s
-                    sha256: 3765abc5a77a22815ac7de997741c6e1c3dcae28851743b8d820c1563870c1e1
+                    sha256: 8a5c3a571ac10ca2ac470fc20c2c0333c93bc7f0794e1bc128b0ae1983171fd2
               configuration:
                 "@type": type.googleapis.com/google.protobuf.StringValue
                 value: |
@@ -74,3 +71,27 @@ spec:
                   error_response:
                     status_code: 429
                     message: Rate limit exceeded
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+              subFilter:
+                name: envoy.filters.http.router
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: rate-limiter-wasm
+          config_discovery:
+            config_source:
+              ads: {}
+            # 插件尚未就绪或配置被拒绝时，监听器立即使用透传过滤器。
+            apply_default_config_without_warming: true
+            default_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+              inline_code: "function envoy_on_request(handle) end"
+            type_urls:
+              - type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
+              - type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
