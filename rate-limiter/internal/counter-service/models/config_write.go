@@ -11,7 +11,8 @@ import (
 
 // ConfigWriteRequest preserves optional-field presence independently of values.
 type ConfigWriteRequest struct {
-	Domain        string  `json:"domain"`
+	Service       string  `json:"service"`
+	Port          int     `json:"port"`
 	APIKey        string  `json:"api_key"`
 	APIKeyHash    *string `json:"api_key_hash"`
 	MaxConcurrent int     `json:"max_concurrent"`
@@ -28,12 +29,12 @@ func (r *ConfigWriteRequest) UnmarshalJSON(data []byte) error {
 	// an alias cannot overwrite a supplied hash with null and bypass the guard.
 	for name, value := range fields {
 		switch strings.ToLower(name) {
-		case "tier":
-			return fmt.Errorf("tier is no longer supported")
-		case "domain", "api_key", "api_key_hash", "max_concurrent", "enabled", "description":
+		case "service", "port", "api_key", "api_key_hash", "max_concurrent", "enabled", "description":
 			if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 				return fmt.Errorf("%s must not be null", name)
 			}
+		default:
+			return fmt.Errorf("unknown field %q", name)
 		}
 	}
 	type wire ConfigWriteRequest
@@ -70,7 +71,7 @@ func (r *ConfigWriteRequest) Config() (RateLimitConfig, error) {
 		return RateLimitConfig{}, fmt.Errorf("api_key_hash must equal SHA256(api_key)")
 	}
 	cfg := RateLimitConfig{
-		Domain: r.Domain, APIKey: r.APIKey, MaxConcurrent: r.MaxConcurrent, Enabled: *r.Enabled,
+		Service: r.Service, Port: r.Port, APIKey: r.APIKey, MaxConcurrent: r.MaxConcurrent, Enabled: *r.Enabled,
 	}
 	if r.Description != nil {
 		cfg.Description, cfg.DescriptionSet = *r.Description, true

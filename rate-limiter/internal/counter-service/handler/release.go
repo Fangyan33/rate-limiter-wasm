@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 
+	"rate-limiter-wasm/rate-limiter/internal/counter-service/models"
 	"rate-limiter-wasm/rate-limiter/internal/counter-service/redis"
 )
 
@@ -24,11 +25,13 @@ func (h *ReleaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-
-	var req struct {
-		LeaseID string `json:"lease_id"`
+	if err := validateQuery(r, nil); err != nil {
+		h.writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+
+	var req models.ReleaseRequest
+	if err := decodeJSON(r.Body, &req); err != nil {
 		h.writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}

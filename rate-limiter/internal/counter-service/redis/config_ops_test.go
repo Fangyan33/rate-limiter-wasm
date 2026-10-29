@@ -39,7 +39,7 @@ func TestSetGetConfig(t *testing.T) {
 	s, client := setupConfigTest(t)
 
 	cfg := models.RateLimitConfig{
-		Domain:        "api.example.com",
+		Port: 8000, Service: "ai/inference",
 		APIKey:        "key001",
 		MaxConcurrent: 10,
 		Enabled:       true,
@@ -49,15 +49,15 @@ func TestSetGetConfig(t *testing.T) {
 	// Set
 	err := client.SetConfig(context.Background(), cfg)
 	assert.NoError(t, err)
-	assert.True(t, s.Exists("rl:config:api.example.com:"+sha256Hex(cfg.APIKey)))
-	assert.False(t, s.Exists("rl:config:api.example.com:"+cfg.APIKey))
+	assert.True(t, s.Exists("rl:service:config:ai/inference:8000:"+sha256Hex(cfg.APIKey)))
+	assert.False(t, s.Exists("rl:service:config:ai/inference:8000:"+cfg.APIKey))
 
 	// Get
-	got, err := client.GetConfig(context.Background(), cfg.Domain, cfg.APIKey)
+	got, err := client.GetConfig(context.Background(), cfg.Service, cfg.Port, cfg.APIKey)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
-	assert.Equal(t, cfg.Domain, got.Domain)
+	assert.Equal(t, cfg.Service, got.Service)
 	assert.Equal(t, sha256Hex(cfg.APIKey), got.APIKeyHash)
 	assert.Equal(t, cfg.MaxConcurrent, got.MaxConcurrent)
 	assert.Equal(t, cfg.Enabled, got.Enabled)
@@ -69,7 +69,7 @@ func TestDeleteConfig(t *testing.T) {
 	s, client := setupConfigTest(t)
 
 	cfg := models.RateLimitConfig{
-		Domain:        "api.example.com",
+		Port: 8000, Service: "ai/inference",
 		APIKey:        "key001",
 		MaxConcurrent: 5,
 		Enabled:       true,
@@ -77,11 +77,11 @@ func TestDeleteConfig(t *testing.T) {
 
 	_ = client.SetConfig(context.Background(), cfg)
 
-	err := client.DeleteConfig(context.Background(), cfg.Domain, cfg.APIKey)
+	err := client.DeleteConfig(context.Background(), cfg.Service, cfg.Port, cfg.APIKey)
 	assert.NoError(t, err)
-	assert.False(t, s.Exists("rl:config:api.example.com:"+sha256Hex(cfg.APIKey)))
+	assert.False(t, s.Exists("rl:service:config:ai/inference:8000:"+sha256Hex(cfg.APIKey)))
 
-	got, err := client.GetConfig(context.Background(), cfg.Domain, cfg.APIKey)
+	got, err := client.GetConfig(context.Background(), cfg.Service, cfg.Port, cfg.APIKey)
 	assert.NoError(t, err)
 	assert.Nil(t, got)
 }
@@ -91,16 +91,16 @@ func TestListConfigs(t *testing.T) {
 
 	// 插入 3 个配置
 	cfgs := []models.RateLimitConfig{
-		{Domain: "api1.com", APIKey: "k1", MaxConcurrent: 2, Enabled: true},
-		{Domain: "api2.com", APIKey: "k2", MaxConcurrent: 5, Enabled: true},
-		{Domain: "*.example.com", APIKey: "k3", MaxConcurrent: 10, Enabled: true},
+		{Port: 8000, Service: "ai/one", APIKey: "k1", MaxConcurrent: 2, Enabled: true},
+		{Port: 8000, Service: "ai/two", APIKey: "k2", MaxConcurrent: 5, Enabled: true},
+		{Port: 8000, Service: "other/three", APIKey: "k3", MaxConcurrent: 10, Enabled: true},
 	}
 
 	for _, cfg := range cfgs {
 		_ = client.SetConfig(context.Background(), cfg)
 	}
 
-	result, err := client.ListConfigs(context.Background(), "rl:config:*", 0, 100)
+	result, err := client.ListConfigs(context.Background(), "rl:service:config:*", 0, 100)
 	require.NoError(t, err)
 	assert.Len(t, result.Configs, 3)
 
@@ -122,7 +122,7 @@ func TestListConfigs_EmptyPage(t *testing.T) {
 	s, client := setupConfigTest(t)
 	// SCAN 可以遍历到与 pattern 不匹配的键，并返回空配置页。
 	s.Set("unrelated", "value")
-	result, err := client.ListConfigs(context.Background(), "rl:config:*", 0, 100)
+	result, err := client.ListConfigs(context.Background(), "rl:service:config:*", 0, 100)
 	require.NoError(t, err)
 	assert.Equal(t, "0", result.Cursor)
 	assert.NotNil(t, result.Configs)
@@ -140,7 +140,7 @@ func TestListConfigs_RedisEmptyObjectPage(t *testing.T) {
 		peer.WriteBulk(`{"cursor":"17","configs":{}}`)
 		return true
 	})
-	result, err := client.ListConfigs(context.Background(), "rl:config:*", 0, 2)
+	result, err := client.ListConfigs(context.Background(), "rl:service:config:*", 0, 2)
 	require.NoError(t, err)
 	assert.Equal(t, "17", result.Cursor)
 	assert.NotNil(t, result.Configs)
@@ -151,7 +151,7 @@ func TestSetConfig_ValidationFail(t *testing.T) {
 	_, client := setupConfigTest(t)
 
 	invalid := models.RateLimitConfig{
-		Domain:        "",
+		Port: 8000, Service: "",
 		APIKey:        "key001",
 		MaxConcurrent: 0,
 		Enabled:       true,

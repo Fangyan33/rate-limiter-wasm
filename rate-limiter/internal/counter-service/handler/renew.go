@@ -27,8 +27,12 @@ func (h *RenewHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	if err := validateQuery(r, nil); err != nil {
+		writeError(http.StatusBadRequest, err.Error())
+		return
+	}
 	var req models.RenewRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r.Body, &req); err != nil {
 		writeError(http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/google/uuid"
 
@@ -37,26 +36,24 @@ var (
 )
 
 // Acquire 执行原子获取并发槽位（调用 Lua acquire_with_config）
-func (c *Client) Acquire(ctx context.Context, req models.AcquireRequest) (*AcquireResult, error) {
+func (c *Client) Acquire(ctx context.Context, req models.ServiceAcquireRequest) (*AcquireResult, error) {
 	if err := req.Validate(); err != nil {
 		return nil, err
 	}
 	leaseID := uuid.New().String()
 	apiKeyHash := hashAPIKey(req.APIKey)
 
-	var keyConfigs [3]string
+	specificConfig := ""
 	if req.APIKey != "" {
-		keyConfigs = c.configKeys(req.Domain, apiKeyHash)
+		specificConfig = c.configKey(req.Service, req.Port, apiKeyHash)
 	}
-	domainHash := hashAPIKey("")
-	domainConfigs := c.configKeys(req.Domain, domainHash)
-	leasesKey := c.Key(fmt.Sprintf("leases:%s:%s", req.Domain, apiKeyHash))
-	domainLeasesKey := c.Key(fmt.Sprintf("leases:%s:%s", req.Domain, domainHash))
-	leaseKey := c.Key(fmt.Sprintf("lease:%s", leaseID))
-
+	defaultHash := hashAPIKey("")
 	keys := []string{
-		keyConfigs[0], leasesKey, leaseKey, keyConfigs[1], keyConfigs[2],
-		domainConfigs[0], domainConfigs[1], domainConfigs[2], domainLeasesKey,
+		specificConfig,
+		c.Key(fmt.Sprintf("service:leases:%s:%d:%s", req.Service, req.Port, apiKeyHash)),
+		c.Key("lease:" + leaseID),
+		c.configKey(req.Service, req.Port, defaultHash),
+		c.Key(fmt.Sprintf("service:leases:%s:%d:%s", req.Service, req.Port, defaultHash)),
 	}
 
 	args := []interface{}{req.TTLMS, leaseID}
@@ -93,17 +90,8 @@ func (c *Client) Acquire(ctx context.Context, req models.AcquireRequest) (*Acqui
 	return &res, nil
 }
 
-// configKeys preserves the exact, immediate-parent wildcard, global order.
-func (c *Client) configKeys(domain, apiKeyHash string) [3]string {
-	wildcard := ""
-	if parts := strings.SplitN(domain, ".", 2); len(parts) == 2 {
-		wildcard = c.Key(fmt.Sprintf("config:*.%s:%s", parts[1], apiKeyHash))
-	}
-	return [3]string{
-		c.Key(fmt.Sprintf("config:%s:%s", domain, apiKeyHash)),
-		wildcard,
-		c.Key(fmt.Sprintf("config:*:%s", apiKeyHash)),
-	}
+func (c *Client) configKey(service string, port int, hash string) string {
+	return c.Key(fmt.Sprintf("service:config:%s:%d:%s", service, port, hash))
 }
 
 // Release 执行释放并发槽位（调用 Lua release_with_lease）

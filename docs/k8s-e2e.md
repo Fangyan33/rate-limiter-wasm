@@ -21,9 +21,9 @@ python3 -B scripts/k8s_e2e.py \
 
 `--image` 必须对应 `--artifacts` 中的 Wasm；原双插件构建及制品保留，限流专项只加载 rate-limiter。测试清单使用 `imagePullPolicy: Never`，需事先保证各节点存在所需镜像。其他本地集群需自行导入这些镜像。
 
-脚本自动生成唯一命名空间，结束时删除测试资源并停止本机 port-forward。使用 `--keep` 可保留资源调试，实际命名空间记录在 `environment.json` 和报告中。脚本比较测试前后的原有 Deployment、EnvoyFilter 和 ConfigMap 配置，结果也进入报告。
+脚本自动生成主测试命名空间和用于同名Service隔离测试的peer命名空间，结束时删除两处测试资源并停止本机 port-forward。使用 `--keep` 可保留资源调试，实际命名空间记录在 `environment.json` 和报告中。脚本比较测试前后的原有 Deployment、EnvoyFilter 和 ConfigMap 配置，结果也进入报告。
 
-限流专项覆盖配置 CRUD/分页、SHA256与写入hash校验、查询不含api_key、必填enabled、description清空、小写域名、key优先及禁用回退、无规则放行、并发限制、释放幂等、TTL、续约、跨副本长流、配置热更新、Redis配置损坏、acquire/renew/release故障放行和Redis实际停机。Redis 停机后数据会丢弃，这是测试 Redis 的预期行为。
+限流专项覆盖namespace/name服务规则CRUD/分页、端口及摘要校验、拒绝domain字段、key优先及禁用回退、无规则放行、释放幂等、TTL、续约、跨副本长流、配置热更新和故障放行。路由专项检查Wasm发送真实cluster，验证短名/FQDN、多域名共享、不同Service/namespace/端口隔离、Service port与targetPort不同、subset及加权路由。Redis停机使用临时测试数据，恢复后重新创建规则。
 
 限流插件使用 ECDS、内置 Lua 透传默认配置、`fail_open: true` 和 `nack_on_code_cache_miss: true`。保留的统计清单维持原加载方式。测试会先确认真实限流已经激活，再执行策略断言，避免把默认透传当成插件正常。加载故障测试覆盖不存在的下载 Cluster、连接拒绝、DNS 失败、摘要不匹配、404、下载超时、损坏模块、非法业务配置、缺少运行时，以及无下载源时的网关冷启动。配置切换期间持续对两个副本发送请求，记录任何非 200 或连接异常。
 
@@ -49,7 +49,17 @@ Istio 1.13.5 中，Agent 下载失败可能将原始远程 Wasm 配置交给 Env
 
 测试租约 TTL 为 1500ms，以便快速验证续约。初始化和恢复均先创建启用规则并通过真实租约占满额度，确认两个网关返回超限429，随后释放并删除探针；缺规则和禁用规则不再用于激活检测。这些结果覆盖当前集群中的功能行为；大规模压测、长时间稳定性和真实模型服务验收仍需单独执行。
 
-## 2026-10-29 新规则专项验证
+## 2026-10-29 服务维度验证
+
+使用 `counter-service:service-rules-20261029-final` 在本地 `kind-kind` / Istio 1.13.5 的隔离双副本网关完成53项测试，全部通过。Wasm请求头阶段正确取得单目标和加权路由选中的cluster；短名与FQDN路由、多域名共享、不同命名空间/服务/端口隔离、subset共享，以及Service port与targetPort不同的情况均通过。
+
+同时验证服务规则导入脚本、拒绝domain字段和查询参数、上游自身429/500/503原样透传，以及下载、初始化、运行时trap、Counter Service和Redis故障放行。主测试命名空间和peer命名空间已删除，原有Deployment/EnvoyFilter/ConfigMap配置保持一致。
+
+报告与原始证据位于 `dist/e2e/20261029-service-rules-final/`。三个Go模块的全量race检查通过。转换函数本机benchmark约732ns/op、176B/op、6allocs/op；该数据仅为函数微基准，不代表网关端到端延迟或生产容量。
+
+完整制品位于 `dist/service-rules-20261029-final/linux-amd64/`，对应归档为 `dist/rate-limiter-wasm-service-rules-20261029-final-linux-amd64.tar.gz`。这些是本地功能验证与构建结果，不代表生产容量、长期稳定性或实际业务验收。
+
+## 2026-10-29 域名规则历史验证（不作为服务维度验收）
 
 使用 `counter-service:rules-20261029-final` 在本地 kind-kind / Istio 1.13.5 的隔离双副本网关运行 `--rate-limiter-only` 与故障Wasm，56项全部通过。覆盖新优先级、禁用回退、无规则无租约放行、查询回写400、Redis字段损坏内部500和业务200，以及下载/初始化/运行时trap等故障。
 

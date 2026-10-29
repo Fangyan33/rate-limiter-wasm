@@ -1,17 +1,30 @@
 package models
 
-import "strings"
+import "fmt"
 
-// NormalizeDomain is shared by configuration CRUD and acquire lookups.
-func NormalizeDomain(domain string) string {
-	return strings.ToLower(strings.TrimSpace(domain))
+// AcquireRequest is the Wasm wire contract; service identity is resolved server-side.
+type AcquireRequest struct {
+	UpstreamCluster string `json:"upstream_cluster"`
+	APIKey          string `json:"api_key"`
+	TTLMS           int64  `json:"ttl_ms"`
 }
 
-// AcquireRequest 获取并发槽位的请求。
-type AcquireRequest struct {
-	Domain string `json:"domain"`  // 实际请求域名，用于配置查找和计数。
-	APIKey string `json:"api_key"` // 先匹配具体 key，再回退空 key 的域名规则。
-	TTLMS  int64  `json:"ttl_ms"`
+// ServiceAcquireRequest is internal and cannot be supplied through the HTTP API.
+type ServiceAcquireRequest struct {
+	Service string
+	Port    int
+	APIKey  string
+	TTLMS   int64
+}
+
+func (r *ServiceAcquireRequest) Validate() error {
+	if err := ValidateService(r.Service, r.Port); err != nil {
+		return err
+	}
+	if r.TTLMS <= 0 {
+		return ErrInvalidTTL
+	}
+	return nil
 }
 
 // AcquireResult Acquire 操作的返回结果（匹配设计文档）
@@ -62,8 +75,9 @@ type RenewResult struct {
 
 // RateLimitConfig is an internal write model, never a query response.
 type RateLimitConfig struct {
-	Domain         string
-	APIKey         string // Empty selects a domain rule; never persisted in Redis.
+	Service        string
+	Port           int
+	APIKey         string // Empty selects the service-port default rule; never persisted in Redis.
 	MaxConcurrent  int
 	Enabled        bool
 	Description    string
@@ -72,7 +86,8 @@ type RateLimitConfig struct {
 
 // ConfigView deliberately has no plaintext API key field.
 type ConfigView struct {
-	Domain        string `json:"domain"`
+	Service       string `json:"service"`
+	Port          int    `json:"port"`
 	APIKeyHash    string `json:"api_key_hash"`
 	MaxConcurrent int    `json:"max_concurrent"`
 	Enabled       bool   `json:"enabled"`
@@ -82,9 +97,8 @@ type ConfigView struct {
 
 // Validate 验证 AcquireRequest
 func (r *AcquireRequest) Validate() error {
-	r.Domain = NormalizeDomain(r.Domain)
-	if r.Domain == "" {
-		return ErrEmptyDomain
+	if r.UpstreamCluster == "" || len(r.UpstreamCluster) > 1024 {
+		return fmt.Errorf("upstream_cluster must contain 1 to 1024 bytes")
 	}
 	if r.TTLMS <= 0 {
 		return ErrInvalidTTL
@@ -102,9 +116,8 @@ func (r *ReleaseRequest) Validate() error {
 
 // Validate 验证 RateLimitConfig
 func (c *RateLimitConfig) Validate() error {
-	c.Domain = NormalizeDomain(c.Domain)
-	if c.Domain == "" {
-		return ErrEmptyDomain
+	if err := ValidateService(c.Service, c.Port); err != nil {
+		return err
 	}
 	if c.MaxConcurrent <= 0 {
 		return ErrInvalidLimit

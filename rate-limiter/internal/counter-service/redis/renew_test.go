@@ -21,9 +21,9 @@ func TestRenewKeepsSlotBeyondOriginalTTL(t *testing.T) {
 	}
 	ctx := context.Background()
 	require.NoError(t, client.SetConfig(ctx, models.RateLimitConfig{
-		Domain: "api.example.com", APIKey: "key001", MaxConcurrent: 1, Enabled: true,
+		Port: 8000, Service: "ai/inference", APIKey: "key001", MaxConcurrent: 1, Enabled: true,
 	}))
-	req := models.AcquireRequest{Domain: "api.example.com", APIKey: "key001", TTLMS: 3000}
+	req := models.ServiceAcquireRequest{Port: 8000, Service: "ai/inference", APIKey: "key001", TTLMS: 3000}
 	lease, err := client.Acquire(ctx, req)
 	require.NoError(t, err)
 	for i := 0; i < 10; i++ {
@@ -33,7 +33,7 @@ func TestRenewKeepsSlotBeyondOriginalTTL(t *testing.T) {
 		require.True(t, renewed.Renewed)
 		_, err = client.Acquire(ctx, req)
 		require.ErrorIs(t, err, redis.ErrLimitExceeded)
-		members, err := s.ZMembers("rl:leases:api.example.com:" + sha256Hex("key001"))
+		members, err := s.ZMembers("rl:service:leases:ai/inference:8000:" + sha256Hex("key001"))
 		require.NoError(t, err)
 		require.Equal(t, []string{lease.LeaseID}, members)
 	}
@@ -50,11 +50,11 @@ func TestRenewDoesNotResurrectLostLease(t *testing.T) {
 			now := time.Unix(1700000000, 0)
 			s.SetTime(now)
 			require.NoError(t, client.SetConfig(ctx, models.RateLimitConfig{
-				Domain: "api.example.com", APIKey: "key001", MaxConcurrent: 1, Enabled: true,
+				Port: 8000, Service: "ai/inference", APIKey: "key001", MaxConcurrent: 1, Enabled: true,
 			}))
-			lease, err := client.Acquire(ctx, models.AcquireRequest{Domain: "api.example.com", APIKey: "key001", TTLMS: 3000})
+			lease, err := client.Acquire(ctx, models.ServiceAcquireRequest{Port: 8000, Service: "ai/inference", APIKey: "key001", TTLMS: 3000})
 			require.NoError(t, err)
-			leasesKey := "rl:leases:api.example.com:" + sha256Hex("key001")
+			leasesKey := "rl:service:leases:ai/inference:8000:" + sha256Hex("key001")
 			switch loss {
 			case "released":
 				_, err = client.Release(ctx, lease.LeaseID)
@@ -82,9 +82,9 @@ func TestRepeatedRenewNeverShortensLease(t *testing.T) {
 	s.SetTime(time.Unix(1700000000, 0))
 	ctx := context.Background()
 	require.NoError(t, client.SetConfig(ctx, models.RateLimitConfig{
-		Domain: "api.example.com", APIKey: "key001", MaxConcurrent: 1, Enabled: true,
+		Port: 8000, Service: "ai/inference", APIKey: "key001", MaxConcurrent: 1, Enabled: true,
 	}))
-	lease, err := client.Acquire(ctx, models.AcquireRequest{Domain: "api.example.com", APIKey: "key001", TTLMS: 3000})
+	lease, err := client.Acquire(ctx, models.ServiceAcquireRequest{Port: 8000, Service: "ai/inference", APIKey: "key001", TTLMS: 3000})
 	require.NoError(t, err)
 	for _, ttl := range []int64{9000, 1000, 3000} {
 		_, err = client.Renew(ctx, models.RenewRequest{LeaseID: lease.LeaseID, TTLMS: ttl})
@@ -97,10 +97,10 @@ func TestRenewReleaseRaceLeavesLeaseReleased(t *testing.T) {
 	s, client := setupTestRedis(t)
 	ctx := context.Background()
 	require.NoError(t, client.SetConfig(ctx, models.RateLimitConfig{
-		Domain: "api.example.com", APIKey: "key001", MaxConcurrent: 1, Enabled: true,
+		Port: 8000, Service: "ai/inference", APIKey: "key001", MaxConcurrent: 1, Enabled: true,
 	}))
 	for i := 0; i < 10; i++ {
-		lease, err := client.Acquire(ctx, models.AcquireRequest{Domain: "api.example.com", APIKey: "key001", TTLMS: 30000})
+		lease, err := client.Acquire(ctx, models.ServiceAcquireRequest{Port: 8000, Service: "ai/inference", APIKey: "key001", TTLMS: 30000})
 		require.NoError(t, err)
 		start := make(chan struct{})
 		errors := make(chan error, 2)
@@ -121,7 +121,7 @@ func TestRenewReleaseRaceLeavesLeaseReleased(t *testing.T) {
 		require.NoError(t, <-errors)
 		require.NoError(t, <-errors)
 		require.False(t, s.Exists("rl:lease:"+lease.LeaseID))
-		count, err := client.Rdb().ZCard(ctx, "rl:leases:api.example.com:"+sha256Hex("key001")).Result()
+		count, err := client.Rdb().ZCard(ctx, "rl:service:leases:ai/inference:8000:"+sha256Hex("key001")).Result()
 		require.NoError(t, err)
 		require.Zero(t, count)
 		_, err = client.Renew(ctx, models.RenewRequest{LeaseID: lease.LeaseID, TTLMS: 30000})

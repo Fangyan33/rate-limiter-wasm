@@ -2,7 +2,6 @@ package handler
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -41,14 +40,13 @@ func (h *ConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // handlePutConfig 处理 PUT /config
 func (h *ConfigHandler) handlePutConfig(w http.ResponseWriter, r *http.Request) {
-	var req models.ConfigWriteRequest
-	decoder := json.NewDecoder(r.Body)
-	if err := decoder.Decode(&req); err != nil {
-		h.writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+	if err := validateQuery(r, nil); err != nil {
+		h.writeError(w, 400, err.Error())
 		return
 	}
-	if err := decoder.Decode(new(any)); err != io.EOF {
-		h.writeError(w, http.StatusBadRequest, "request must contain exactly one JSON object")
+	var req models.ConfigWriteRequest
+	if err := decodeJSON(r.Body, &req); err != nil {
+		h.writeError(w, 400, err.Error())
 		return
 	}
 
@@ -66,17 +64,15 @@ func (h *ConfigHandler) handlePutConfig(w http.ResponseWriter, r *http.Request) 
 	h.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// handleGetConfig 处理 GET /config?domain=...&api_key=...
+// handleGetConfig locates a rule by service, port and API key.
 func (h *ConfigHandler) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	domain := models.NormalizeDomain(r.URL.Query().Get("domain"))
-	apiKey := r.URL.Query().Get("api_key")
-
-	if domain == "" {
-		h.writeError(w, http.StatusBadRequest, "missing domain query param")
+	service, port, apiKey, err := configIdentity(r)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	cfg, err := h.redisClient.GetConfig(r.Context(), domain, apiKey)
+	cfg, err := h.redisClient.GetConfig(r.Context(), service, port, apiKey)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -89,17 +85,15 @@ func (h *ConfigHandler) handleGetConfig(w http.ResponseWriter, r *http.Request) 
 	h.writeJSON(w, http.StatusOK, cfg)
 }
 
-// handleDeleteConfig 处理 DELETE /config?domain=...&api_key=...
+// handleDeleteConfig deletes a service-port rule.
 func (h *ConfigHandler) handleDeleteConfig(w http.ResponseWriter, r *http.Request) {
-	domain := models.NormalizeDomain(r.URL.Query().Get("domain"))
-	apiKey := r.URL.Query().Get("api_key")
-
-	if domain == "" {
-		h.writeError(w, http.StatusBadRequest, "missing domain query param")
+	service, port, apiKey, err := configIdentity(r)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	if err := h.redisClient.DeleteConfig(r.Context(), domain, apiKey); err != nil {
+	if err := h.redisClient.DeleteConfig(r.Context(), service, port, apiKey); err != nil {
 		h.writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -109,6 +103,10 @@ func (h *ConfigHandler) handleDeleteConfig(w http.ResponseWriter, r *http.Reques
 
 // handleListConfigs 处理 GET /configs?cursor=0&limit=100
 func (h *ConfigHandler) handleListConfigs(w http.ResponseWriter, r *http.Request) {
+	if err := validateQuery(r, []string{"cursor", "limit"}); err != nil {
+		h.writeError(w, 400, err.Error())
+		return
+	}
 	cursorStr := r.URL.Query().Get("cursor")
 	limitStr := r.URL.Query().Get("limit")
 
@@ -119,7 +117,7 @@ func (h *ConfigHandler) handleListConfigs(w http.ResponseWriter, r *http.Request
 	}
 
 	// 默认全量扫描 pattern
-	pattern := h.redisClient.Key("config:*")
+	pattern := h.redisClient.Key("service:config:*")
 
 	result, err := h.redisClient.ListConfigs(r.Context(), pattern, cursor, limit)
 	if err != nil {

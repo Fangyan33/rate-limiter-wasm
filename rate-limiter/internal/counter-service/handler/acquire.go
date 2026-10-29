@@ -15,12 +15,17 @@ const acquireTimeout = 500 * time.Millisecond
 
 // AcquireHandler 处理 POST /acquire 请求
 type AcquireHandler struct {
-	redisClient *redis.Client
+	redisClient   *redis.Client
+	clusterDomain string
 }
 
 // NewAcquireHandler 创建 handler 实例
 func NewAcquireHandler(client *redis.Client) *AcquireHandler {
-	return &AcquireHandler{redisClient: client}
+	return NewAcquireHandlerWithClusterDomain(client, "cluster.local")
+}
+
+func NewAcquireHandlerWithClusterDomain(client *redis.Client, clusterDomain string) *AcquireHandler {
+	return &AcquireHandler{redisClient: client, clusterDomain: clusterDomain}
 }
 
 // ServeHTTP 实现 http.Handler 接口
@@ -29,9 +34,13 @@ func (h *AcquireHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	if err := validateQuery(r, nil); err != nil {
+		h.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	var req models.AcquireRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r.Body, &req); err != nil {
 		h.writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
@@ -41,10 +50,16 @@ func (h *AcquireHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	service, port, ok := models.ParseUpstreamCluster(req.UpstreamCluster, h.clusterDomain)
+	if !ok {
+		h.writeJSON(w, http.StatusOK, models.AcquireResult{Allowed: true})
+		return
+	}
+
 	// 所有连接等待、命令执行和重试共用一个预算，预留 HTTP 响应时间。
 	ctx, cancel := context.WithTimeout(r.Context(), acquireTimeout)
 	defer cancel()
-	result, err := h.redisClient.Acquire(ctx, req)
+	result, err := h.redisClient.Acquire(ctx, models.ServiceAcquireRequest{Service: service, Port: port, APIKey: req.APIKey, TTLMS: req.TTLMS})
 	if err != nil {
 		status := http.StatusInternalServerError
 		reason := "internal_error"

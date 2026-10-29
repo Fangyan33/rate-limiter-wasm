@@ -16,8 +16,8 @@ func TestAcquireHandler_WritesAccessLogWithMaskedAPIKey(t *testing.T) {
 
 	acquireHandler, _, mr := setupTestHandler(t)
 
-	mr.HSet("rl:config:api.example.com:test-key", "max_concurrent", "5")
-	mr.HSet("rl:config:api.example.com:test-key", "enabled", "true")
+	mr.HSet("rl:service:config:ai/inference:test-key", "max_concurrent", "5")
+	mr.HSet("rl:service:config:ai/inference:test-key", "enabled", "true")
 
 	// Capture standard logger output.
 	var buf bytes.Buffer
@@ -30,7 +30,7 @@ func TestAcquireHandler_WritesAccessLogWithMaskedAPIKey(t *testing.T) {
 		log.SetFlags(prevFlags)
 	}()
 
-	body := strings.NewReader(`{"domain":"api.example.com","api_key":"test-key","ttl_ms":30000}`)
+	body := strings.NewReader(`{"upstream_cluster":"outbound|8000||inference.ai.svc.cluster.local","api_key":"test-key","ttl_ms":30000}`)
 	req := httptest.NewRequest(http.MethodPost, "/acquire", body)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()

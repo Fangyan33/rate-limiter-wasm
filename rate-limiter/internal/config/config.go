@@ -1,7 +1,9 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -17,15 +19,8 @@ const (
 )
 
 type Config struct {
-	Domains          []string               `yaml:"domains"`
-	RateLimits       []RateLimit            `yaml:"rate_limits"`
 	DistributedLimit DistributedLimitConfig `yaml:"distributed_limit"`
 	ErrorResponse    ErrorResponse          `yaml:"error_response"`
-}
-
-type RateLimit struct {
-	APIKey        string `yaml:"api_key"` // Empty means a shared limit per matched domain.
-	MaxConcurrent int    `yaml:"max_concurrent"`
 }
 
 type DistributedLimitConfig struct {
@@ -46,6 +41,19 @@ type CounterServiceConfig struct {
 }
 
 func (c *CounterServiceConfig) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.MappingNode {
+		for i := 0; i < len(value.Content); i += 2 {
+			name := value.Content[i].Value
+			switch name {
+			case "cluster", "timeout_ms", "acquire_path", "release_path", "renew_path", "lease_ttl_ms":
+			default:
+				return fmt.Errorf("unknown counter_service field %q", name)
+			}
+			if value.Content[i+1].Tag == "!!null" {
+				return fmt.Errorf("counter_service.%s must not be null", name)
+			}
+		}
+	}
 	type rawCounterServiceConfig struct {
 		Cluster     string `yaml:"cluster"`
 		TimeoutMS   int    `yaml:"timeout_ms"`
@@ -80,10 +88,15 @@ type ErrorResponse struct {
 
 func Parse(data []byte) (Config, error) {
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("unmarshal config: %w", err)
 	}
 
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return Config{}, fmt.Errorf("configuration must contain one YAML document")
+	}
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -114,30 +127,6 @@ func (c *Config) applyDefaults() {
 }
 
 func (c *Config) Validate() error {
-	if len(c.Domains) == 0 {
-		return fmt.Errorf("domains must not be empty")
-	}
-
-	for _, domain := range c.Domains {
-		if strings.TrimSpace(domain) == "" {
-			return fmt.Errorf("domains must not contain empty values")
-		}
-	}
-
-	seen := make(map[string]struct{}, len(c.RateLimits))
-	for _, limit := range c.RateLimits {
-		if limit.APIKey != "" && strings.TrimSpace(limit.APIKey) == "" {
-			return fmt.Errorf("rate_limits.api_key must not contain only whitespace")
-		}
-		if limit.MaxConcurrent <= 0 {
-			return fmt.Errorf("rate_limits.max_concurrent must be greater than zero")
-		}
-		if _, ok := seen[limit.APIKey]; ok {
-			return fmt.Errorf("duplicate api_key: %s", limit.APIKey)
-		}
-		seen[limit.APIKey] = struct{}{}
-	}
-
 	if c.DistributedLimit.Enabled {
 		if strings.TrimSpace(c.DistributedLimit.Backend) != "counter_service" {
 			return fmt.Errorf("distributed_limit.backend must be counter_service when enabled")

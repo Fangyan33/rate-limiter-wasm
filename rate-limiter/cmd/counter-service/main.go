@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"rate-limiter-wasm/rate-limiter/internal/counter-service/handler"
+	"rate-limiter-wasm/rate-limiter/internal/counter-service/models"
 	"rate-limiter-wasm/rate-limiter/internal/counter-service/redis"
 )
 
@@ -29,7 +30,11 @@ func main() {
 	defer client.Close()
 	log.Printf("configured redis at %s; connections are established on demand", redisAddr)
 
-	acquireHandler := handler.NewAcquireHandler(client)
+	clusterDomain := getEnv("KUBERNETES_CLUSTER_DOMAIN", "cluster.local")
+	if !models.ValidClusterDomain(clusterDomain) {
+		log.Printf("invalid KUBERNETES_CLUSTER_DOMAIN; service recognition disabled, requests fail open")
+	}
+	acquireHandler := handler.NewAcquireHandlerWithClusterDomain(client, clusterDomain)
 	releaseHandler := handler.NewReleaseHandler(client)
 	configHandler := handler.NewConfigHandler(client)
 

@@ -11,12 +11,12 @@ import (
 func TestReleaseHandler_Success(t *testing.T) {
 	acquireHandler, releaseHandler, _ := setupTestHandler(t)
 
-	setTestConfig(t, acquireHandler.redisClient, "api.example.com", "test-key", 5, true)
+	setTestConfig(t, acquireHandler.redisClient, "ai/inference", "test-key", 5, true)
 
 	acquireBody, _ := json.Marshal(map[string]interface{}{
-		"domain":  "api.example.com",
-		"api_key": "test-key",
-		"ttl_ms":  30000,
+		"upstream_cluster": "outbound|8000||inference.ai.svc.cluster.local",
+		"api_key":          "test-key",
+		"ttl_ms":           30000,
 	})
 	acquireReq := httptest.NewRequest(http.MethodPost, "/acquire", bytes.NewReader(acquireBody))
 	acquireReq.Header.Set("Content-Type", "application/json")

@@ -1,269 +1,35 @@
 package config_test
 
 import (
-	"testing"
-
+	"github.com/stretchr/testify/require"
 	"rate-limiter-wasm/rate-limiter/internal/config"
+	"testing"
 )
 
-func TestParseConfigParsesMinimalConfig(t *testing.T) {
-	raw := []byte(`domains:
-  - api.example.com
-  - "*.service.example.com"
-rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 10
-error_response:
-  status_code: 429
-  message: Rate limit exceeded for API key
-`)
-
-	cfg, err := config.Parse(raw)
-	if err != nil {
-		t.Fatalf("Parse() error = %v", err)
-	}
-
-	if len(cfg.Domains) != 2 {
-		t.Fatalf("expected 2 domains, got %d", len(cfg.Domains))
-	}
-
-	if len(cfg.RateLimits) != 1 {
-		t.Fatalf("expected 1 rate limit, got %d", len(cfg.RateLimits))
-	}
-
-	if cfg.RateLimits[0].APIKey != "key_basic_001" {
-		t.Fatalf("unexpected api_key: %q", cfg.RateLimits[0].APIKey)
-	}
-
-	if cfg.RateLimits[0].MaxConcurrent != 10 {
-		t.Fatalf("expected max_concurrent=10, got %d", cfg.RateLimits[0].MaxConcurrent)
-	}
-
-	if cfg.ErrorResponse.StatusCode != 429 {
-		t.Fatalf("expected status_code=429, got %d", cfg.ErrorResponse.StatusCode)
-	}
-
-	if cfg.ErrorResponse.Message != "Rate limit exceeded for API key" {
-		t.Fatalf("unexpected error message: %q", cfg.ErrorResponse.Message)
-	}
-}
-
-func TestParseDistributedStoreCounterServiceConfig(t *testing.T) {
-	cfg, err := config.Parse([]byte(`domains:
-  - api.example.com
-rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 10
-distributed_limit:
-  enabled: true
-  backend: "counter_service"
-  counter_service:
-    cluster: "ratelimit-service"
-    timeout_ms: 100
-`))
-	if err != nil {
-		t.Fatalf("Parse() error = %v", err)
-	}
-
-	if !cfg.DistributedLimit.Enabled {
-		t.Fatal("expected distributed limit to be enabled")
-	}
-	if cfg.DistributedLimit.Backend != "counter_service" {
-		t.Fatalf("expected backend counter_service, got %q", cfg.DistributedLimit.Backend)
-	}
-	if cfg.DistributedLimit.CounterService.Cluster != "ratelimit-service" {
-		t.Fatalf("unexpected counter service cluster: %q", cfg.DistributedLimit.CounterService.Cluster)
-	}
-	if cfg.DistributedLimit.CounterService.TimeoutMS != 100 {
-		t.Fatalf("expected timeout_ms=100, got %d", cfg.DistributedLimit.CounterService.TimeoutMS)
-	}
-}
-
-func TestParseDistributedStoreCounterServiceDefaultsPathsAndLeaseTTL(t *testing.T) {
-	cfg, err := config.Parse([]byte(`domains:
-  - api.example.com
-rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 10
-distributed_limit:
-  enabled: true
-  backend: "counter_service"
-  counter_service:
-    cluster: "ratelimit-service"
-`))
-	if err != nil {
-		t.Fatalf("Parse() error = %v", err)
-	}
-
-	if cfg.DistributedLimit.CounterService.AcquirePath != "/acquire" {
-		t.Fatalf("expected default acquire_path=/acquire, got %q", cfg.DistributedLimit.CounterService.AcquirePath)
-	}
-	if cfg.DistributedLimit.CounterService.ReleasePath != "/release" {
-		t.Fatalf("expected default release_path=/release, got %q", cfg.DistributedLimit.CounterService.ReleasePath)
-	}
-	if cfg.DistributedLimit.CounterService.RenewPath != "/renew" {
-		t.Fatalf("expected default renew_path=/renew, got %q", cfg.DistributedLimit.CounterService.RenewPath)
-	}
-	if cfg.DistributedLimit.CounterService.LeaseTTLMS != 30000 {
-		t.Fatalf("expected default lease_ttl_ms=30000, got %d", cfg.DistributedLimit.CounterService.LeaseTTLMS)
-	}
-}
-
-func TestParseRenewPath(t *testing.T) {
-	for _, path := range []string{"/leases/renew", "renew"} {
-		t.Run(path, func(t *testing.T) {
-			cfg, err := config.Parse([]byte(`domains: [api.example.com]
-distributed_limit:
+const enabled = `distributed_limit:
   enabled: true
   backend: counter_service
   counter_service:
     cluster: counter-service
-    renew_path: ` + path + "\n"))
-			if path == "renew" {
-				if err == nil {
-					t.Fatal("expected relative renew_path to be rejected")
-				}
-			} else if err != nil || cfg.DistributedLimit.CounterService.RenewPath != path {
-				t.Fatalf("custom renew_path not preserved: cfg=%+v err=%v", cfg, err)
-			}
-		})
-	}
+`
+
+func TestConfigDefaultsAndDisabledMode(t *testing.T) {
+	cfg, err := config.Parse([]byte(enabled))
+	require.NoError(t, err)
+	require.True(t, cfg.DistributedLimit.Enabled)
+	cs := cfg.DistributedLimit.CounterService
+	require.Equal(t, "/acquire", cs.AcquirePath)
+	require.Equal(t, "/renew", cs.RenewPath)
+	require.Equal(t, "/release", cs.ReleasePath)
+	require.Equal(t, 30000, cs.LeaseTTLMS)
+	require.Equal(t, 429, cfg.ErrorResponse.StatusCode)
+	cfg, err = config.Parse([]byte("distributed_limit:\n  enabled: false\n"))
+	require.NoError(t, err)
+	require.False(t, cfg.DistributedLimit.Enabled)
 }
-
-func TestParseDistributedStoreCounterServiceRejectsInvalidLeaseTTL(t *testing.T) {
-	_, err := config.Parse([]byte(`domains:
-  - api.example.com
-rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 10
-distributed_limit:
-  enabled: true
-  backend: "counter_service"
-  counter_service:
-    cluster: "ratelimit-service"
-    lease_ttl_ms: 0
-`))
-	if err == nil {
-		t.Fatal("expected Parse() to reject non-positive lease_ttl_ms")
-	}
-}
-
-func TestParseDistributedStoreCounterServiceRejectsPathWithoutLeadingSlash(t *testing.T) {
-	_, err := config.Parse([]byte(`domains:
-  - api.example.com
-rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 10
-distributed_limit:
-  enabled: true
-  backend: "counter_service"
-  counter_service:
-    cluster: "ratelimit-service"
-    acquire_path: acquire
-`))
-	if err == nil {
-		t.Fatal("expected Parse() to reject acquire_path without leading slash")
-	}
-}
-
-func TestParseDistributedStoreCounterServiceLeavesTimeoutUnsetWhenOmitted(t *testing.T) {
-	cfg, err := config.Parse([]byte(`domains:
-  - api.example.com
-rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 10
-distributed_limit:
-  enabled: true
-  backend: "counter_service"
-  counter_service:
-    cluster: "ratelimit-service"
-`))
-	if err != nil {
-		t.Fatalf("Parse() error = %v", err)
-	}
-
-	if cfg.DistributedLimit.CounterService.TimeoutMS != 0 {
-		t.Fatalf("expected timeout_ms to remain unset, got %d", cfg.DistributedLimit.CounterService.TimeoutMS)
-	}
-}
-
-func TestParseConfigRejectsEmptyDomains(t *testing.T) {
-	_, err := config.Parse([]byte(`rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 10
-error_response:
-  status_code: 429
-  message: denied
-`))
-	if err == nil {
-		t.Fatal("expected Parse() to reject empty domains")
-	}
-}
-
-func TestParseConfigRejectsInvalidRateLimit(t *testing.T) {
-	_, err := config.Parse([]byte(`domains:
-  - api.example.com
-rate_limits:
-  - api_key: ""
-    max_concurrent: 0
-error_response:
-  status_code: 429
-  message: denied
-`))
-	if err == nil {
-		t.Fatal("expected Parse() to reject invalid rate limit entry")
-	}
-}
-
-func TestParseDomainOnlyRateLimit(t *testing.T) {
-	for _, entry := range []string{"api_key: \"\"\n    max_concurrent: 2", "max_concurrent: 2"} {
-		cfg, err := config.Parse([]byte("domains: [api.example.com]\nrate_limits:\n  - " + entry + "\n"))
-		if err != nil {
-			t.Fatalf("Parse(%q): %v", entry, err)
-		}
-		if cfg.RateLimits[0].APIKey != "" || cfg.RateLimits[0].MaxConcurrent != 2 {
-			t.Fatalf("unexpected domain rule: %+v", cfg.RateLimits)
-		}
-	}
-	for _, entries := range []string{
-		"  - max_concurrent: 1\n  - api_key: \"\"\n    max_concurrent: 2\n",
-		"  - api_key: \"   \"\n    max_concurrent: 2\n",
-		"  - max_concurrent: 0\n",
-	} {
-		if _, err := config.Parse([]byte("domains: [api.example.com]\nrate_limits:\n" + entries)); err == nil {
-			t.Fatalf("expected invalid rules to be rejected: %q", entries)
-		}
-	}
-}
-
-func TestParseConfigDefaultsErrorResponseWhenOmitted(t *testing.T) {
-	cfg, err := config.Parse([]byte(`domains:
-  - api.example.com
-rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 10
-`))
-	if err != nil {
-		t.Fatalf("Parse() error = %v", err)
-	}
-
-	if cfg.ErrorResponse.StatusCode != 429 {
-		t.Fatalf("expected default status_code=429, got %d", cfg.ErrorResponse.StatusCode)
-	}
-
-	if cfg.ErrorResponse.Message == "" {
-		t.Fatal("expected default error_response.message to be populated")
-	}
-}
-
-func TestEmptyLocalRulesAreUnlimited(t *testing.T) {
-	for _, data := range []string{"domains: [api.example.com]", "domains: [api.example.com]\nrate_limits: []"} {
-		cfg, err := config.Parse([]byte(data))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(cfg.RateLimits) != 0 {
-			t.Fatalf("unexpected rules: %+v", cfg.RateLimits)
-		}
+func TestInvalidAndRemovedConfiguration(t *testing.T) {
+	for _, data := range []string{"", "{", "domains: [api.example.com]", "rate_limits: []", "---\n{}\n---\n{}", "distributed_limit:\n  enabled: true", enabled + "    lease_ttl_ms: 0\n", enabled + "    renew_path: relative\n", enabled + "    timeout_ms: -1\n", enabled + "    timeout_ms: null\n", enabled + "    typo: bad\n"} {
+		_, err := config.Parse([]byte(data))
+		require.Error(t, err, data)
 	}
 }

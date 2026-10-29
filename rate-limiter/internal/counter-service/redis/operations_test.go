@@ -33,12 +33,12 @@ func TestAcquire_ExactMatch(t *testing.T) {
 	apiKeyHash := sha256Hex("key001")
 
 	// 准备精确配置
-	s.HSet("rl:config:api.example.com:"+apiKeyHash, "max_concurrent", "5")
-	s.HSet("rl:config:api.example.com:"+apiKeyHash, "enabled", "true")
+	s.HSet("rl:service:config:ai/inference:8000:"+apiKeyHash, "max_concurrent", "5")
+	s.HSet("rl:service:config:ai/inference:8000:"+apiKeyHash, "enabled", "true")
 
 	ctx := context.Background()
-	result, err := client.Acquire(ctx, models.AcquireRequest{
-		Domain: "api.example.com",
+	result, err := client.Acquire(ctx, models.ServiceAcquireRequest{
+		Port: 8000, Service: "ai/inference",
 		APIKey: "key001",
 		TTLMS:  30000,
 	})
@@ -49,64 +49,20 @@ func TestAcquire_ExactMatch(t *testing.T) {
 	assert.Equal(t, 5, result.MaxConcurrent)
 	assert.Equal(t, 1, result.CurrentCount)
 
-	members, err := s.ZMembers("rl:leases:api.example.com:" + apiKeyHash)
+	members, err := s.ZMembers("rl:service:leases:ai/inference:8000:" + apiKeyHash)
 	assert.NoError(t, err)
 	assert.Len(t, members, 1)
 	assert.Equal(t, result.LeaseID, members[0])
 
 	leaseVal, _ := s.Get("rl:lease:" + result.LeaseID)
-	assert.Equal(t, "rl:leases:api.example.com:"+apiKeyHash, leaseVal)
-}
-
-func TestAcquire_WildcardFallback(t *testing.T) {
-	s, client := setupTestRedis(t)
-	apiKeyHash := sha256Hex("key001")
-
-	// 只设置通配符配置
-	s.HSet("rl:config:*.example.com:"+apiKeyHash, "max_concurrent", "3")
-	s.HSet("rl:config:*.example.com:"+apiKeyHash, "enabled", "true")
-
-	result, err := client.Acquire(context.Background(), models.AcquireRequest{
-		Domain: "api.example.com",
-		APIKey: "key001",
-		TTLMS:  30000,
-	})
-
-	assert.NoError(t, err)
-	assert.True(t, result.Allowed)
-	assert.Equal(t, 3, result.MaxConcurrent)
-
-	leaseVal, _ := s.Get("rl:lease:" + result.LeaseID)
-	assert.Equal(t, "rl:leases:api.example.com:"+apiKeyHash, leaseVal)
-}
-
-func TestAcquire_GlobalFallback(t *testing.T) {
-	s, client := setupTestRedis(t)
-	apiKeyHash := sha256Hex("key001")
-
-	// 只设置全局配置
-	s.HSet("rl:config:*:"+apiKeyHash, "max_concurrent", "1")
-	s.HSet("rl:config:*:"+apiKeyHash, "enabled", "true")
-
-	result, err := client.Acquire(context.Background(), models.AcquireRequest{
-		Domain: "any.domain.com",
-		APIKey: "key001",
-		TTLMS:  30000,
-	})
-
-	assert.NoError(t, err)
-	assert.True(t, result.Allowed)
-	assert.Equal(t, 1, result.MaxConcurrent)
-
-	leaseVal, _ := s.Get("rl:lease:" + result.LeaseID)
-	assert.Equal(t, "rl:leases:any.domain.com:"+apiKeyHash, leaseVal)
+	assert.Equal(t, "rl:service:leases:ai/inference:8000:"+apiKeyHash, leaseVal)
 }
 
 func TestAcquire_ConfigNotFound(t *testing.T) {
 	_, client := setupTestRedis(t)
 
-	result, err := client.Acquire(context.Background(), models.AcquireRequest{
-		Domain: "unknown.com",
+	result, err := client.Acquire(context.Background(), models.ServiceAcquireRequest{
+		Port: 8000, Service: "ai/unknown",
 		APIKey: "key999",
 		TTLMS:  30000,
 	})
@@ -120,11 +76,11 @@ func TestAcquire_APIKeyDisabled(t *testing.T) {
 	s, client := setupTestRedis(t)
 	apiKeyHash := sha256Hex("key001")
 
-	s.HSet("rl:config:api.example.com:"+apiKeyHash, "max_concurrent", "5")
-	s.HSet("rl:config:api.example.com:"+apiKeyHash, "enabled", "false")
+	s.HSet("rl:service:config:ai/inference:8000:"+apiKeyHash, "max_concurrent", "5")
+	s.HSet("rl:service:config:ai/inference:8000:"+apiKeyHash, "enabled", "false")
 
-	result, err := client.Acquire(context.Background(), models.AcquireRequest{
-		Domain: "api.example.com",
+	result, err := client.Acquire(context.Background(), models.ServiceAcquireRequest{
+		Port: 8000, Service: "ai/inference",
 		APIKey: "key001",
 		TTLMS:  30000,
 	})
@@ -138,15 +94,15 @@ func TestAcquire_LimitExceeded(t *testing.T) {
 	s, client := setupTestRedis(t)
 	apiKeyHash := sha256Hex("key001")
 
-	s.HSet("rl:config:api.example.com:"+apiKeyHash, "max_concurrent", "2")
-	s.HSet("rl:config:api.example.com:"+apiKeyHash, "enabled", "true")
+	s.HSet("rl:service:config:ai/inference:8000:"+apiKeyHash, "max_concurrent", "2")
+	s.HSet("rl:service:config:ai/inference:8000:"+apiKeyHash, "enabled", "true")
 
 	ctx := context.Background()
 
 	// 先占满 2 个槽
 	for i := 0; i < 2; i++ {
-		_, err := client.Acquire(ctx, models.AcquireRequest{
-			Domain: "api.example.com",
+		_, err := client.Acquire(ctx, models.ServiceAcquireRequest{
+			Port: 8000, Service: "ai/inference",
 			APIKey: "key001",
 			TTLMS:  30000,
 		})
@@ -154,8 +110,8 @@ func TestAcquire_LimitExceeded(t *testing.T) {
 	}
 
 	// 第 3 次应该被拒绝
-	result, err := client.Acquire(ctx, models.AcquireRequest{
-		Domain: "api.example.com",
+	result, err := client.Acquire(ctx, models.ServiceAcquireRequest{
+		Port: 8000, Service: "ai/inference",
 		APIKey: "key001",
 		TTLMS:  30000,
 	})
@@ -171,12 +127,12 @@ func TestRelease_Success(t *testing.T) {
 	s, client := setupTestRedis(t)
 	apiKeyHash := sha256Hex("key001")
 
-	s.HSet("rl:config:api.example.com:"+apiKeyHash, "max_concurrent", "5")
-	s.HSet("rl:config:api.example.com:"+apiKeyHash, "enabled", "true")
+	s.HSet("rl:service:config:ai/inference:8000:"+apiKeyHash, "max_concurrent", "5")
+	s.HSet("rl:service:config:ai/inference:8000:"+apiKeyHash, "enabled", "true")
 
 	// 先 acquire
-	acqResult, err := client.Acquire(context.Background(), models.AcquireRequest{
-		Domain: "api.example.com",
+	acqResult, err := client.Acquire(context.Background(), models.ServiceAcquireRequest{
+		Port: 8000, Service: "ai/inference",
 		APIKey: "key001",
 		TTLMS:  30000,
 	})
@@ -194,13 +150,13 @@ func TestAcquire_LeaseExpiredAutoRecovery(t *testing.T) {
 	s, client := setupTestRedis(t)
 	apiKeyHash := sha256Hex("key001")
 
-	s.HSet("rl:config:api.example.com:"+apiKeyHash, "max_concurrent", "1")
-	s.HSet("rl:config:api.example.com:"+apiKeyHash, "enabled", "true")
+	s.HSet("rl:service:config:ai/inference:8000:"+apiKeyHash, "max_concurrent", "1")
+	s.HSet("rl:service:config:ai/inference:8000:"+apiKeyHash, "enabled", "true")
 
 	ctx := context.Background()
 
-	r1, err := client.Acquire(ctx, models.AcquireRequest{
-		Domain: "api.example.com",
+	r1, err := client.Acquire(ctx, models.ServiceAcquireRequest{
+		Port: 8000, Service: "ai/inference",
 		APIKey: "key001",
 		TTLMS:  100,
 	})
@@ -210,8 +166,8 @@ func TestAcquire_LeaseExpiredAutoRecovery(t *testing.T) {
 	s.FastForward(200 * time.Millisecond)
 	time.Sleep(120 * time.Millisecond)
 
-	r2, err := client.Acquire(ctx, models.AcquireRequest{
-		Domain: "api.example.com",
+	r2, err := client.Acquire(ctx, models.ServiceAcquireRequest{
+		Port: 8000, Service: "ai/inference",
 		APIKey: "key001",
 		TTLMS:  30000,
 	})
@@ -224,12 +180,12 @@ func TestRelease_Idempotent(t *testing.T) {
 	s, client := setupTestRedis(t)
 	apiKeyHash := sha256Hex("key001")
 
-	s.HSet("rl:config:api.example.com:"+apiKeyHash, "max_concurrent", "5")
-	s.HSet("rl:config:api.example.com:"+apiKeyHash, "enabled", "true")
+	s.HSet("rl:service:config:ai/inference:8000:"+apiKeyHash, "max_concurrent", "5")
+	s.HSet("rl:service:config:ai/inference:8000:"+apiKeyHash, "enabled", "true")
 
 	ctx := context.Background()
-	acqResult, err := client.Acquire(ctx, models.AcquireRequest{
-		Domain: "api.example.com",
+	acqResult, err := client.Acquire(ctx, models.ServiceAcquireRequest{
+		Port: 8000, Service: "ai/inference",
 		APIKey: "key001",
 		TTLMS:  30000,
 	})

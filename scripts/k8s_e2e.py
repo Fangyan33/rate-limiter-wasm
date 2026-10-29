@@ -78,6 +78,8 @@ class Suite:
         self.key = jwt("basic_001")
         self.key2 = jwt("premium_001")
         self.host = "api.e2e.test"
+        self.service = self.ns + "/fixture"
+        self.peer_ns = self.ns + "-peer"
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
     def k(self, *args, data=None, timeout=60):
@@ -112,7 +114,7 @@ class Suite:
         def obj(kind, name, spec=None, **extra):
             api = ("apps/v1" if kind == "Deployment" else
                    "networking.istio.io/v1alpha3" if kind in
-                   ("EnvoyFilter", "Gateway", "VirtualService") else "v1")
+                   ("EnvoyFilter", "Gateway", "VirtualService", "DestinationRule") else "v1")
             result = {"apiVersion": api, "kind": kind,
                       "metadata": {"name": name, "namespace": ns}, **extra}
             if spec is not None:
@@ -152,7 +154,14 @@ class Suite:
                     "readinessProbe": {"httpGet": {"path": "/health", "port": 8080},
                                        "periodSeconds": 2}},
                     volumes=[{"name": "code", "configMap": {"name": "fixture"}}])
-        service("fixture")
+        obj("Service", "fixture", {"selector": {"app": "fixture"}, "ports": [
+            {"name": "http-main", "port": 8080, "targetPort": 8080},
+            {"name": "http-alternate", "port": 8081, "targetPort": 8080}]})
+        obj("Service", "fixture-alt", {"selector": {"app": "fixture"}, "ports": [
+            {"name": "http", "port": 8080, "targetPort": 8080}]})
+        obj("DestinationRule", "fixture", {"host": f"fixture.{ns}.svc.cluster.local", "subsets": [
+            {"name": "v1", "labels": {"app": "fixture"}},
+            {"name": "v2", "labels": {"app": "fixture"}}]})
         gateway = deployment("e2e-gateway", {"name": "istio-proxy", "image": "auto",
                     "imagePullPolicy": "IfNotPresent", "env": [
                         {"name": "ISTIO_META_UNPRIVILEGED_POD", "value": "true"}],
@@ -166,14 +175,25 @@ class Suite:
                                "proxy.istio.io/config": '{"concurrency":2}'}
         obj("Gateway", "e2e", {"selector": {"app": "e2e-gateway", "istio": "rate-limiter-e2e"},
             "servers": [{"port": {"number": 8080, "name": "http-e2e", "protocol": "HTTP"},
-                         "hosts": ["*.e2e.test", "unmatched.test"]}]})
-        obj("VirtualService", "e2e", {"hosts": ["*.e2e.test", "unmatched.test"],
-            "gateways": ["e2e"], "http": [{"route": [{"destination": {
-                "host": f"fixture.{ns}.svc.cluster.local", "port": {"number": 8080}}}],
-                "timeout": "20s"}]})
+                         "hosts": ["*.e2e.test", "unmatched.test", "no-route.test"]}]})
+        def route(prefix, host, port=8080, subset=None):
+            destination = {"host": host, "port": {"number": port}}
+            if subset:
+                destination["subset"] = subset
+            return {"match": [{"uri": {"prefix": prefix}}], "route": [{"destination": destination}], "timeout": "20s"}
+        routes = [route("/short", "fixture"), route("/port", "fixture", 8081),
+                  route("/other", "fixture-alt"), route("/peer", f"fixture.{self.peer_ns}.svc.cluster.local")]
+        routes.append({"match": [{"uri": {"prefix": "/subset"}}], "route": [
+            {"destination": {"host": "fixture", "subset": subset, "port": {"number": 8080}}, "weight": 50}
+            for subset in ("v1", "v2")], "timeout": "20s"})
+        routes.append({"match": [{"uri": {"prefix": "/weighted"}}], "route": [
+            {"destination": {"host": host, "port": {"number": 8080}}, "weight": 50}
+            for host in ("fixture", "fixture-alt")], "timeout": "20s"})
+        routes.append(route("/", f"fixture.{ns}.svc.cluster.local"))
+        obj("VirtualService", "e2e", {"hosts": ["*.e2e.test", "unmatched.test"], "gateways": ["e2e"], "http": routes})
         for plugin in (("rate-limiter",) if self.args.rate_limiter_only else ("rate-limiter", "token-stats")):
             digest = hashlib.sha256((Path(self.args.artifacts) / (plugin + ".wasm")).read_bytes()).hexdigest()
-            config = "domains:\n  - '*.e2e.test'\n"
+            config = "" if plugin == "rate-limiter" else "domains:\n  - '*.e2e.test'\n"
             if plugin == "rate-limiter":
                 config += ("distributed_limit:\n  enabled: true\n  backend: counter_service\n"
                            "  counter_service:\n    cluster: e2e-counter\n    acquire_path: /acquire\n"
@@ -277,21 +297,29 @@ class Suite:
         eventually(lambda: self.gateway(host="unmatched.test")["status"] == 200, 40)
         # ECDS starts with a pass-through default. Confirm rate limiting is active
         # before testing policy behavior, rather than mistaking fallback for success.
+        fixture = json.loads(self.k("-n", self.ns, "get", "pods", "-l", "app=fixture", "-o", "json"))["items"][0]
+        peer = {"apiVersion": "v1", "kind": "List", "items": [
+            {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": self.peer_ns}},
+            {"apiVersion": "v1", "kind": "Service", "metadata": {"name": "fixture", "namespace": self.peer_ns},
+             "spec": {"ports": [{"name": "http", "port": 8080, "targetPort": 8080}]}},
+            {"apiVersion": "v1", "kind": "Endpoints", "metadata": {"name": "fixture", "namespace": self.peer_ns},
+             "subsets": [{"addresses": [{"ip": fixture["status"]["podIP"]}], "ports": [{"name": "http", "port": 8080}]}]}]}
+        self.k("apply", "-f", "-", data=peer)
         self.assert_limiter_active()
 
     def assert_limiter_active(self):
         # A real occupied lease distinguishes an active limiter from the ECDS Lua default.
-        self.config(self.host, self.key, 1)
+        self.config(self.service, self.key, 1)
         lease = None
         try:
-            acquired = self.acquire(self.host, self.key, ttl=120000)
+            acquired = self.acquire(self.service, self.key, ttl=120000)
             check(acquired["status"] == 200 and acquired["body"].get("lease_id"), acquired)
             lease = acquired["body"]["lease_id"]
             eventually(lambda: all(self.gateway(pod=i, key=self.key)["status"] == 429 for i in range(2)), 60)
         finally:
             if lease:
                 self.release(lease)
-            self.delete(self.host, self.key)
+            self.delete(self.service, self.key)
 
     def inventory(self):
         data = json.loads(self.k("get", "deployments,envoyfilters,configmaps", "-A", "-o", "json"))
@@ -303,27 +331,31 @@ class Suite:
     def api(self, path, data=None, method=None):
         return request(self.cs, path, method or ("POST" if data is not None else "GET"), data)
 
-    def config(self, domain, key="", limit=1, enabled=True):
-        response = self.api("/config", {"domain": domain, "api_key": key,
+    def config(self, service, key="", limit=1, enabled=True, port=8080):
+        response = self.api("/config", {"service": service, "port": port, "api_key": key,
                             "max_concurrent": limit, "enabled": enabled}, "PUT")
         check(response["status"] == 200, response)
 
-    def delete(self, domain, key=""):
-        return self.api("/config?" + urlencode({"domain": domain, "api_key": key}), method="DELETE")
+    def delete(self, service, key="", port=8080):
+        return self.api("/config?" + urlencode({"service": service, "port": port, "api_key": key}), method="DELETE")
 
-    def acquire(self, domain, key="", ttl=1500):
-        return self.api("/acquire", {"domain": domain, "api_key": key, "ttl_ms": ttl})
+    def cluster(self, service=None, port=8080, subset=""):
+        namespace, name = (service or self.service).split("/")
+        return f"outbound|{port}|{subset}|{name}.{namespace}.svc.cluster.local"
+
+    def acquire(self, service, key="", ttl=1500, port=8080, subset=""):
+        return self.api("/acquire", {"upstream_cluster": self.cluster(service, port, subset), "api_key": key, "ttl_ms": ttl})
 
     def release(self, lease):
         return self.api("/release", {"lease_id": lease})
 
-    def gateway(self, pod=0, host=None, key=None, data=None, authorization=None):
+    def gateway(self, pod=0, host=None, key=None, data=None, authorization=None, path="/v1/chat/completions"):
         headers = {"Host": host or self.host}
         if authorization is not None:
             headers["Authorization"] = authorization
         elif key is not None:
             headers["Authorization"] = "Bearer " + key
-        return request(self.gw[pod][0], "/v1/chat/completions", "POST",
+        return request(self.gw[pod][0], path, "POST",
                        data if data is not None else {"messages": [{"role": "user", "content": "hello"}]}, headers)
 
     def control(self, **state):
@@ -337,14 +369,14 @@ class Suite:
     def redis(self, *args):
         return self.k("-n", self.ns, "exec", "deployment/redis", "--", "redis-cli", "--raw", *args).strip()
 
-    def leases(self, domain=None, key=None):
-        domain = domain or self.host
+    def leases(self, service=None, key=None, port=8080):
+        service = service or self.service
         key = self.key if key is None else key
-        name = "rl:leases:" + domain + ":" + hashlib.sha256(key.encode()).hexdigest()
+        name = f"rl:service:leases:{service}:{port}:" + hashlib.sha256(key.encode()).hexdigest()
         return int(self.redis("ZCARD", name))
 
-    def idle(self, domain=None, key=None):
-        eventually(lambda: self.leases(domain, key) == 0)
+    def idle(self, service=None, key=None, port=8080):
+        eventually(lambda: self.leases(service, key, port) == 0)
 
     def metrics(self):
         return "\n".join(request(p[1], "/stats/prometheus")["raw"] for p in self.gw)
@@ -358,306 +390,269 @@ class Suite:
 
     def counter_cases(self):
         def crud():
-            self.config("crud.e2e.test", "opaque", 2)
-            result = self.api("/config?domain=crud.e2e.test&api_key=opaque")
-            check(result["body"].get("api_key_hash") == hashlib.sha256(b"opaque").hexdigest(), result)
-            check(result["body"]["max_concurrent"] == 2 and "api_key" not in result["body"], result)
-            check(self.redis("EXISTS", "rl:config:crud.e2e.test:opaque") == "0", "Redis 含明文 key")
-            self.config("crud.e2e.test", "opaque", 3)
-            check(self.api("/config?domain=crud.e2e.test&api_key=opaque")["body"]["max_concurrent"] == 3, "更新失败")
-            self.delete("crud.e2e.test", "opaque")
-            check(self.api("/config?domain=crud.e2e.test&api_key=opaque")["status"] == 404, "删除失败")
-            return "CRUD 正常，Redis 使用 SHA256 key"
-        self.run_case("CS-配置CRUD及哈希存储", crud)
+            service = self.ns + "/crud"
+            self.config(service, "opaque", 2)
+            query = "/config?" + urlencode({"service": service, "port": 8080, "api_key": "opaque"})
+            item = self.api(query)["body"]
+            check(item["service"] == service and item["port"] == 8080 and "domain" not in item and "api_key" not in item, item)
+            check(item["api_key_hash"] == hashlib.sha256(b"opaque").hexdigest(), item)
+            self.config(service, "opaque", 3)
+            check(self.api(query)["body"]["max_concurrent"] == 3, "更新失败")
+            self.delete(service, "opaque")
+            check(self.api(query)["status"] == 404, "删除失败")
+            return "service/port CRUD、SHA256 和无 domain 响应契约正确"
+        self.run_case("CS-服务配置CRUD", crud)
+
+        def import_cli():
+            service = self.ns + "/imported"
+            key = "import-test-key"
+            rule = {"service": service, "port": 8080, "api_key": key, "max_concurrent": 2, "enabled": True}
+            source = self.out / "import-rules.json"
+            source.write_text(json.dumps([rule]))
+            command = ["bash", str(ROOT / "scripts/import-service-configs.sh"), "-f", str(source), "-u", f"http://127.0.0.1:{self.cs}"]
+            result = subprocess.run(command, text=True, capture_output=True, timeout=20)
+            check(result.returncode == 0 and key not in result.stdout + result.stderr, result.stdout + result.stderr)
+            query = "/config?" + urlencode({"service": service, "port": 8080, "api_key": key})
+            check(self.api(query)["body"]["max_concurrent"] == 2, "导入未生效")
+            source.write_text(json.dumps([{**rule, "enabled": "bad"}]))
+            result = subprocess.run(command, text=True, capture_output=True, timeout=20)
+            check(result.returncode != 0 and key not in result.stdout + result.stderr, result.stdout + result.stderr)
+            check(self.api(query)["body"]["max_concurrent"] == 2, "错误导入修改了已有规则")
+            self.delete(service, key)
+            return "JSON规则导入成功，非法规则失败退出且不修改原值，输出无明文Key"
+        self.run_case("CS-服务规则导入脚本", import_cli)
 
         def pagination():
-            empty = self.api("/configs?cursor=0&limit=2")
-            self.save("empty-config-page.json", empty)
-            check(empty["status"] == 200 and empty["body"].get("configs") == [], empty)
+            check(self.api("/configs?cursor=0&limit=2")["body"]["configs"] == [], "空页不是空数组")
             for n in range(15):
-                self.config(f"page{n}.e2e.test", "page")
+                self.config(self.ns + f"/page{n}", "page")
             cursor, seen = "0", set()
             for _ in range(100):
                 response = self.api("/configs?" + urlencode({"cursor": cursor, "limit": 2}))
                 check(response["status"] == 200, response)
-                result = response["body"]
-                for item in result["configs"]:
-                    check("api_key" not in item and "tier" not in item, item)
-                    seen.add(item["domain"])
-                cursor = result["cursor"]
-                if str(cursor) == "0":
+                for item in response["body"]["configs"]:
+                    check("api_key" not in item and "domain" not in item, item)
+                    seen.add((item["service"], item["port"]))
+                cursor = response["body"]["cursor"]
+                if cursor == "0":
                     break
-            check(all(f"page{n}.e2e.test" in seen for n in range(15)), seen)
-            return f"分页遍历收齐 15 条配置，列表不返回明文 key"
+            check(all((self.ns + f"/page{n}", 8080) in seen for n in range(15)), seen)
+            return "完整翻页收齐15条服务规则，空页与摘要字段正确"
         self.run_case("CS-分页列表", pagination)
 
         def validation():
-            samples = [("/acquire", "GET", None, 405), ("/acquire", "POST", b"{", 400),
-                       ("/acquire", "POST", {"api_key": "x", "ttl_ms": 1}, 400),
-                       ("/acquire", "POST", {"domain": self.host, "ttl_ms": 0}, 400),
-                       ("/renew", "POST", {"lease_id": "", "ttl_ms": 1}, 400),
-                       ("/renew", "POST", {"lease_id": "x", "ttl_ms": 0}, 400),
-                       ("/release", "POST", {}, 400),
-                       ("/config", "PUT", {"domain": self.host, "max_concurrent": 0}, 400)]
-            for path, method, data, status in samples:
-                response = request(self.cs, path, method, data)
-                check(response["status"] == status, response)
-            return f"{len(samples)} 个非法请求正确返回 400/405"
-        self.run_case("CS-输入校验", validation)
+            payload = {"service": self.service, "port": 8080, "enabled": True, "max_concurrent": 1}
+            invalid = [{**payload, "service": v} for v in ("fixture", f"fixture.{self.ns}.svc.cluster.local", "*", self.ns + "/*")]
+            invalid += [{**payload, "port": v} for v in (None, 0, 65536, 1.5, "8080")]
+            invalid += [{**payload, "domain": self.host}, {**payload, "enabled": None}]
+            for data in invalid:
+                check(self.api("/config", data, "PUT")["status"] == 400, data)
+            for path in ("/config?domain=example.com", "/configs?domain=example.com", "/config?service=" + self.service):
+                check(self.api(path)["status"] == 400, path)
+            for data in ({"domain": self.host, "ttl_ms": 1000}, {"upstream_cluster": self.cluster(), "service": self.service, "ttl_ms": 1000}):
+                check(self.api("/acquire", data)["status"] == 400, data)
+            for path in ("/acquire", "/renew", "/release"):
+                check(self.api(path + "?domain=x", {}, "POST")["status"] == 400, path)
+            return "仅namespace/name有效；端口必填；domain和身份覆盖字段拒绝"
+        self.run_case("CS-新契约输入校验", validation)
 
-        def slots():
-            domain = "slots.e2e.test"
-            self.config(domain, "slots")
-            first = self.acquire(domain, "slots")["body"]
-            check(first.get("allowed") is True and first["current_count"] == 1, first)
-            denied = self.acquire(domain, "slots")["body"]
-            check(denied.get("reason") == "limit_exceeded", denied)
-            check(self.release(first["lease_id"])["body"]["released"] is True, "释放失败")
-            repeated = self.release(first["lease_id"])["body"]
-            check(repeated["released"] is False and repeated["reason"] == "lease_not_found", repeated)
-            again = self.acquire(domain, "slots")["body"]
-            check(again["allowed"] is True, again)
-            self.release(again["lease_id"])
-            return "limit=1 时拒绝第2个 acquire；释放幂等，释放后恢复"
-        self.run_case("CS-并发及释放幂等", slots)
+        def policies():
+            service = self.ns + "/policy"
+            self.config(service, "", 1)
+            self.config(service, "known", 1)
+            key_lease = self.acquire(service, "known")["body"]
+            check(self.acquire(service, "known")["body"].get("reason") == "limit_exceeded", "满额规则错误回退")
+            default_lease = self.acquire(service, "unknown")["body"]
+            check(default_lease.get("lease_id"), default_lease)
+            self.config(service, "known", 1, enabled=False)
+            check(self.acquire(service, "known")["body"].get("reason") == "limit_exceeded", "禁用key未匹配默认额度")
+            self.release(key_lease["lease_id"])
+            check(self.acquire(service, "known")["body"].get("reason") == "limit_exceeded", "释放key影响了默认池")
+            self.release(default_lease["lease_id"])
+            self.config(service, "", 1, enabled=False)
+            check(self.acquire(service, "known")["body"] == {"allowed": True}, "全部禁用未放行")
+            check(self.acquire(self.ns + "/missing")["body"] == {"allowed": True}, "无规则产生租约")
+            check(self.api("/release", {"lease_id": default_lease["lease_id"]})["body"]["released"] is False, "重复释放不幂等")
+            return "key优先、满额不回退、禁用回退、独立额度池和无规则放行通过"
+        self.run_case("CS-规则优先级与独立额度池", policies)
 
-        def unmetered():
-            for domain, enabled in (("missing.e2e.test", None), ("disabled.e2e.test", False)):
-                if enabled is not None:
-                    self.config(domain, "disabled", enabled=enabled)
-                result = self.acquire(domain, "disabled")
-                check(result["status"] == 200 and result["body"] == {"allowed": True}, result)
-                check(self.leases(domain, "disabled") == 0, "无规则不能创建租约集合")
-            return "缺失或禁用规则均正常放行，无租约和计数"
-        self.run_case("CS-无启用规则放行", unmetered)
-
-        def write_contract():
-            domain, key = "write.e2e.test", "opaque"
-            payload = {"domain": domain.upper(), "api_key": key, "max_concurrent": 2,
-                       "enabled": True, "description": "initial", "api_key_hash": hashlib.sha256(key.encode()).hexdigest()}
-            check(self.api("/config", payload, "PUT")["status"] == 200, payload)
-            query = "/config?" + urlencode({"domain": domain.upper(), "api_key": key})
-            before = self.api(query)["body"]
-            check(before["domain"] == domain and "api_key" not in before and "tier" not in before, before)
-            for field, value in (("enabled", None), ("enabled", "true"), ("api_key_hash", ""),
-                                 ("api_key_hash", None), ("api_key_hash", "bad"), ("tier", "removed"),
-                                 ("description", None)):
-                invalid = {**payload, field: value}
-                result = self.api("/config", invalid, "PUT")
-                check(result["status"] == 400 and self.api(query)["body"] == before, result)
-            for suffix in (',"api_key_hash":"wrong","API_KEY_HASH":null}', ',"Tier":null}'):
-                raw = (json.dumps(payload)[:-1] + suffix).encode()
-                result = self.api("/config", raw, "PUT")
-                check(result["status"] == 400 and self.api(query)["body"] == before, result)
-            missing = dict(payload)
-            del missing["enabled"]
-            check(self.api("/config", missing, "PUT")["status"] == 400, "enabled 必须显式填写")
-            check(self.api("/config", before, "PUT")["status"] == 400, "查询对象不能被误写为域名规则")
-            del payload["description"]
-            check(self.api("/config", payload, "PUT")["status"] == 200, payload)
-            check(self.api(query)["body"].get("description") == "initial", "省略描述必须保留")
-            payload["description"] = ""
-            check(self.api("/config", payload, "PUT")["status"] == 200, payload)
-            check("description" not in self.api(query)["body"], "显式空串必须清空")
-            fields = self.redis("HKEYS", "rl:config:" + domain + ":" + payload["api_key_hash"]).splitlines()
-            check(not any(field in fields for field in ("tier", "api_key", "api_key_hash")), fields)
-            self.delete(domain.upper(), key)
-            check(self.api(query)["status"] == 404, "大小写域名删除未统一")
-            return "hash/布尔类型校验拒绝脏写；查询无明文；描述省略保留、空串删除；域名小写"
-        self.run_case("CS-写入契约与域名规范化", write_contract)
-
-        def ttl_and_renew():
-            domain = "ttl.e2e.test"
-            self.config(domain, "ttl")
-            first = self.acquire(domain, "ttl", 600)["body"]
+        def ttl():
+            service = self.ns + "/ttl"
+            self.config(service, "ttl")
+            first = self.acquire(service, "ttl", 600)["body"]
             time.sleep(0.3)
-            renewed = self.api("/renew", {"lease_id": first["lease_id"], "ttl_ms": 1600})
-            check(renewed["body"].get("renewed") is True, renewed)
+            check(self.api("/renew", {"lease_id": first["lease_id"], "ttl_ms": 1600})["body"]["renewed"], "续约失败")
             time.sleep(0.5)
-            check(self.acquire(domain, "ttl")["body"]["reason"] == "limit_exceeded", "续约未延长租约")
+            check(self.acquire(service, "ttl")["body"].get("reason") == "limit_exceeded", "续约无效")
             self.release(first["lease_id"])
-            check(self.api("/renew", {"lease_id": first["lease_id"], "ttl_ms": 1600})["body"].get("renewed") is False,
-                  "已释放租约被复活")
-            short = self.acquire(domain, "ttl", 150)["body"]
-            time.sleep(0.3)
-            next_lease = self.acquire(domain, "ttl")["body"]
-            check(next_lease.get("allowed") is True and next_lease["current_count"] == 1, next_lease)
+            check(not self.api("/renew", {"lease_id": first["lease_id"], "ttl_ms": 1600})["body"]["renewed"], "租约复活")
+            self.acquire(service, "ttl", 100)
+            time.sleep(0.2)
+            next_lease = self.acquire(service, "ttl")["body"]
+            check(next_lease["current_count"] == 1, next_lease)
             self.release(next_lease["lease_id"])
-            return "TTL 自动恢复；renew 延长有效期；release 后 renew 不复活"
-        self.run_case("CS-TTL与续约", ttl_and_renew)
+            return "续约保持额度、释放不复活、TTL到期回收通过"
+        self.run_case("CS-TTL续约释放", ttl)
 
-        def fallback():
-            key = "fallback"
-            self.config("*.wild.e2e.test", key, 2)
-            self.config("exact.wild.e2e.test", key, 1)
-            for domain, limit in (("exact.wild.e2e.test", 1), ("foo.wild.e2e.test", 2)):
-                result = self.acquire(domain, key)["body"]
-                check(result.get("max_concurrent") == limit, result)
-                self.release(result["lease_id"])
-            self.config("*", key, 3)
-            result = self.acquire("outside.test", key)["body"]
-            check(result.get("max_concurrent") == 3, result)
-            self.release(result["lease_id"])
-            self.config("exact.wild.e2e.test", key, 1, enabled=False)
-            result = self.acquire("exact.wild.e2e.test", key)["body"]
-            check(result.get("max_concurrent") == 2, result)
-            self.release(result["lease_id"])
-            self.config("*.wild.e2e.test", key, 2, enabled=False)
-            result = self.acquire("exact.wild.e2e.test", key)["body"]
-            check(result.get("max_concurrent") == 3, result)
-            self.release(result["lease_id"])
-            self.config("*", key, 3, enabled=False)
-            self.config("exact.wild.e2e.test", "", 4)
-            result = self.acquire("exact.wild.e2e.test", key)["body"]
-            check(result.get("max_concurrent") == 4, result)
-            self.release(result["lease_id"])
-            for pattern, api_key in (("*", key), ("*.wild.e2e.test", key),
-                                     ("exact.wild.e2e.test", key), ("exact.wild.e2e.test", "")):
-                self.delete(pattern, api_key)
-            check(self.acquire("exact.wild.e2e.test", key)["body"] == {"allowed": True}, "最终无规则放行")
-            return "具体 key 精确 > 父域 > 全局；禁用逐级跳过，再回退域名，最终放行"
-        self.run_case("CS-域名规则回退", fallback)
+        def unsupported():
+            for cluster in ("PassthroughCluster", "BlackHoleCluster", "outbound|8080||external.example.com", "outbound|8080||fixture.ai.svc.other"):
+                result = self.api("/acquire", {"upstream_cluster": cluster, "ttl_ms": 1000})
+                check(result["status"] == 200 and result["body"] == {"allowed": True}, result)
+            return "非Kubernetes目标不创建租约并正常放行"
+        self.run_case("CS-无法识别目标放行", unsupported)
 
     def gateway_cases(self):
-        self.config(self.host, self.key)
-        self.config(self.host, self.key2, 2)
+        self.config(self.service, self.key)
+        self.config(self.service, self.key2, 2)
 
-        def bypass():
-            response = self.gateway(host="unmatched.test")
-            check(response["status"] == 200 and response["body"].get("id") == "e2e-upstream", response)
-            return "未匹配域名且无 Authorization 到达上游"
-        self.run_case("GW-域名旁路", bypass)
-
-        for name, auth in (("缺少Authorization", None), ("非法Authorization", "Basic abc"),
-                           ("未知key", "Bearer unknown")):
-            def allow_unmatched(auth=auth):
-                response = self.gateway(authorization=auth)
-                check(response["status"] == 200 and response["body"].get("id") == "e2e-upstream", response)
-                return "无匹配规则时正常到达上游"
-            self.run_case("GW-" + name, allow_unmatched)
-
-        def allowed():
-            response = self.gateway(key=self.key)
-            check(response["status"] == 200 and response["body"].get("id") == "e2e-upstream", response)
-            self.idle()
-            return "合法 key 经实际 WASM/Counter Service/Redis 到达上游，结束后释放"
-        self.run_case("GW-合法key与自动释放", allowed)
-
-        def concurrency():
-            self.idle()
+        def route_identity():
             self.control(clear=True)
-            future = self.pool.submit(self.gateway, 0, None, self.key, {"stream": True, "hold_seconds": 5})
-            acquired = eventually(lambda: self.events("acquire", domain=self.host, api_key=self.key))[-1]
-            lease_id = json.loads(acquired["body"])["lease_id"]
-            # 超过初始 1500ms TTL，确认真实网关根上下文持续续约。
+            for host, path in ((self.host, "/v1/chat/completions"), ("second.e2e.test", "/short")):
+                response = self.gateway(host=host, key=self.key, path=path)
+                check(response["status"] == 200, response)
+                self.idle()
+            events = self.events("acquire", upstream_cluster=self.cluster(), api_key=self.key)
+            check(len(events) == 2, events)
+            check(all("domain" not in e["request"] and "service" not in e["request"] for e in events), events)
+            check(all(json.loads(e["body"]).get("lease_id") for e in events), events)
+            self.save("route-identity.json", events)
+            return "短名和FQDN路由均取得真实cluster；Wasm发送原值，CounterService成功创建租约"
+        self.run_case("GW-真实路由目标与短名FQDN", route_identity)
+
+        def shared_domains():
+            self.idle(); self.control(clear=True)
+            held = self.pool.submit(self.gateway, 0, self.host, self.key, {"stream": True, "hold_seconds": 5})
+            event = eventually(lambda: self.events("acquire", upstream_cluster=self.cluster(), api_key=self.key))[-1]
+            lease = json.loads(event["body"])["lease_id"]
             time.sleep(2.3)
-            ttl = int(self.redis("PTTL", "rl:lease:" + lease_id))
-            check(ttl > 0, f"超过初始 TTL 后租约已过期: {ttl}")
-            renewals = self.events("renew", lease_id=lease_id)
-            check(len(renewals) >= 2 and all(json.loads(e["body"]).get("renewed") is True for e in renewals), renewals)
-            denied = self.gateway(pod=1, key=self.key)
-            check(denied["status"] == 429, denied)
-            response = future.result(timeout=12)
-            check(response["status"] == 200 and "[DONE]" in response["raw"], response)
+            renewals = self.events("renew", lease_id=lease)
+            check(len(renewals) >= 2 and int(self.redis("PTTL", "rl:lease:" + lease)) > 0, renewals)
+            check(self.gateway(pod=1, host="second.e2e.test", key=self.key)["status"] == 429, "不同域名未共享额度")
+            check(held.result()["status"] == 200, "原SSE异常")
             self.idle()
-            check(self.gateway(pod=1, key=self.key)["status"] == 200, "释放后另一副本未恢复")
-            self.idle()
-            self.save("long-stream-renewals.json", request(self.fixture, "/control")["body"])
-            return {"renewals_after_2_3s": len(renewals), "remaining_ttl_ms": ttl,
-                    "pod0": self.pods[0], "pod1": self.pods[1], "other_pod_status": 429,
-                    "after_release_status": 200}
-        self.run_case("GW-跨副本限流与长流续约", concurrency)
+            check(self.gateway(pod=1, host="second.e2e.test", key=self.key)["status"] == 200, "释放后未恢复")
+            self.idle(); self.save("long-stream-renewals.json", request(self.fixture, "/control")["body"])
+            return "跨域名、跨双副本共享额度，超过初始TTL继续续约，释放后恢复"
+        self.run_case("GW-跨域名共享及长请求续约", shared_domains)
+
+        def default_pool():
+            self.config(self.service, "", 1)
+            try:
+                held = self.pool.submit(self.gateway, 0, None, None, {"stream": True, "hold_seconds": 2})
+                eventually(lambda: self.leases(key="") == 1)
+                for auth in ("Basic malformed", "Bearer unknown"):
+                    check(self.gateway(pod=1, authorization=auth)["status"] == 429, auth)
+                check(self.gateway(pod=1, key=self.key)["status"] == 200, "具体key不应占用默认池")
+                check(held.result()["status"] == 200, "无头请求异常")
+                self.idle(key="")
+            finally:
+                self.delete(self.service)
+            return "缺少凭据、非法头和未知key共用默认池，具体key独立"
+        self.run_case("GW-服务端口默认额度", default_pool)
+
+        def isolation():
+            identities = [(self.service, 8081, "/port"), (self.ns + "/fixture-alt", 8080, "/other"), (self.peer_ns + "/fixture", 8080, "/peer")]
+            for service, port, path in identities:
+                self.config(service, self.key, port=port)
+            try:
+                held = self.pool.submit(self.gateway, 0, None, self.key, {"stream": True, "hold_seconds": 3})
+                eventually(lambda: self.leases() == 1)
+                for service, port, path in identities:
+                    response = self.gateway(pod=1, key=self.key, path=path)
+                    check(response["status"] == 200, response)
+                    events = self.events("acquire", upstream_cluster=self.cluster(service, port), api_key=self.key)
+                    check(events and json.loads(events[-1]["body"]).get("lease_id"), events)
+                    self.idle(service, self.key, port)
+                check(self.gateway(pod=1, key=self.key)["status"] == 429, "主服务未保持占用")
+                check(held.result()["status"] == 200, "主流失败");self.idle()
+            finally:
+                for service, port, path in identities:
+                    self.delete(service, self.key, port)
+            return "不同Service、namespace和Service端口额度隔离；8081→targetPort8080按8081计数"
+        self.run_case("GW-服务命名空间端口隔离", isolation)
+
+        def weighted():
+            self.control(clear=True)
+            self.config(self.service, self.key, 1)
+            self.config(self.ns + "/fixture-alt", self.key, 1)
+            try:
+                for path in ("/subset", "/weighted"):
+                    for _ in range(30):
+                        check(self.gateway(key=self.key, path=path)["status"] == 200, "加权路由失败")
+                        self.idle();self.idle(self.ns + "/fixture-alt")
+                events = self.events("acquire", api_key=self.key)
+                seen = {e["request"]["upstream_cluster"] for e in events}
+                expected = {self.cluster(subset="v1"), self.cluster(subset="v2"), self.cluster(), self.cluster(self.ns + "/fixture-alt")}
+                check(expected <= seen, seen)
+                for event in events:
+                    result = json.loads(event["body"])
+                    check(result.get("lease_id") and result.get("max_concurrent") == 1, event)
+                # Occupy the common service pool, then both weighted subsets must deny.
+                occupied = self.acquire(self.service, self.key, ttl=10000)["body"]["lease_id"]
+                try:
+                    for _ in range(8):
+                        check(self.gateway(key=self.key, path="/subset")["status"] == 429, "subset意外拆分额度")
+                finally:
+                    self.release(occupied)
+                self.save("weighted-route-targets.json", events)
+                return "读取加权路由实际选中cluster；v1/v2共享服务端口池，跨服务分别计数"
+            finally:
+                self.delete(self.ns + "/fixture-alt", self.key)
+        self.run_case("GW-subset及加权路由", weighted)
 
         def hot_update():
-            self.idle()
-            future = self.pool.submit(self.gateway, 0, None, self.key, {"stream": True, "hold_seconds": 2.5})
+            held = self.pool.submit(self.gateway, 0, None, self.key, {"stream": True, "hold_seconds": 2.5})
             eventually(lambda: self.leases() == 1)
-            check(self.gateway(pod=1, key=self.key)["status"] == 429, "更新前应拒绝")
-            self.config(self.host, self.key, 2)
-            check(self.gateway(pod=1, key=self.key)["status"] == 200, "更新阈值后未生效")
-            check(future.result()["status"] == 200, "原请求异常")
-            self.idle()
-            self.delete(self.host, self.key)
-            check(self.gateway(key=self.key)["status"] == 200, "删除后无规则应放行")
-            self.config(self.host, self.key)
-            return "阈值 1→2 即时生效，删除 key 后无规则放行"
-        self.run_case("GW-配置热更新", hot_update)
+            check(self.gateway(pod=1, key=self.key)["status"] == 429, "更新前未拒绝")
+            self.config(self.service, self.key, 2)
+            check(self.gateway(pod=1, key=self.key)["status"] == 200, "更新未生效")
+            check(held.result()["status"] == 200, "原流异常");self.idle()
+            self.delete(self.service, self.key)
+            check(self.gateway(key=self.key)["status"] == 200, "删除规则未放行")
+            self.config(self.service, self.key)
+            return "阈值即时更新，删除规则放行"
+        self.run_case("GW-服务规则热更新", hot_update)
 
-        def domain_limit():
-            host = "domain.e2e.test"
-            self.config(host, "", 1)
-            future = self.pool.submit(self.gateway, 0, host, None, {"stream": True, "hold_seconds": 2})
-            eventually(lambda: self.leases(host, "") == 1)
-            for auth in ("Bearer arbitrary", "Basic malformed"):
-                check(self.gateway(pod=1, host=host, authorization=auth)["status"] == 429, auth)
-            check(future.result()["status"] == 200, "无 Authorization 域名规则未放行")
-            self.idle(host, "")
-            check(self.gateway(host=host, authorization="Basic malformed")["status"] == 200, "非法 Authorization 未匹配域名规则")
-            self.idle(host, "")
-            self.delete(host)
-            return "无头、任意 key 和非法头共用域名总额度"
-        self.run_case("GW-空key域名总并发", domain_limit)
-
-        def precedence():
-            host = "one.precedence.e2e.test"
-            self.config(host, self.key, 1)
-            self.config("*.precedence.e2e.test", "", 1)
-            held = self.pool.submit(self.gateway, 0, host, self.key, {"stream": True, "hold_seconds": 2})
-            eventually(lambda: self.leases(host, self.key) == 1)
-            check(self.gateway(pod=1, host=host, key=self.key)["status"] == 429, "key 满额不能回退域名")
-            check(self.gateway(pod=1, host=host, key="unknown")["status"] == 200, "key 额度不应占用域名池")
-            check(held.result()["status"] == 200, "原 key 流异常")
-            self.idle(host)
-            self.config(host, self.key, 1, enabled=False)
-            held = self.pool.submit(self.gateway, 0, host, "unknown", {"stream": True, "hold_seconds": 2})
-            eventually(lambda: self.leases(host, "") == 1)
-            check(self.gateway(pod=1, host=host, key=self.key)["status"] == 429, "禁用 key 必须使用域名额度")
-            check(held.result()["status"] == 200, "域名流异常")
-            self.idle(host, "")
-            self.config("*.precedence.e2e.test", "", 1, enabled=False)
-            check(self.gateway(host=host, key=self.key)["status"] == 200, "全部规则禁用后应放行")
-            check(self.leases(host, self.key) == 0 and self.leases(host, "") == 0, "无规则不应创建租约")
-            self.delete("*.precedence.e2e.test")
-            self.delete(host, self.key)
-            return "key 优先且超限不回退；禁用后匹配域名；全部禁用则无租约放行"
-        self.run_case("GW-key优先与禁用回退", precedence)
-
-        def corrupt_config():
-            host, key = "corrupt.e2e.test", "corrupt"
-            redis_key = "rl:config:" + host + ":" + hashlib.sha256(key.encode()).hexdigest()
+        def corrupt():
+            key = "corrupt"
+            redis_key = f"rl:service:config:{self.service}:8080:" + hashlib.sha256(key.encode()).hexdigest()
+            self.config(self.service, "", 100)
             try:
-                self.config(host, "", 100)
                 for field in ("enabled", "max_concurrent"):
                     for value in (None, "garbage", "TRUE", "0", "1.5"):
-                        self.config(host, key, 1)
+                        self.config(self.service, key)
                         if value is None:
                             self.redis("HDEL", redis_key, field)
                         else:
                             self.redis("HSET", redis_key, field, value)
                         self.control(clear=True)
-                        response = self.gateway(host=host, key=key)
-                        check(response["status"] == 200 and response["body"].get("id") == "e2e-upstream", response)
-                        event = eventually(lambda: self.events("acquire", domain=host, api_key=key))[-1]
+                        check(self.gateway(key=key)["status"] == 200, "内部故障阻断业务")
+                        event = eventually(lambda: self.events("acquire", upstream_cluster=self.cluster(), api_key=key))[-1]
                         check(event["status"] == 500 and json.loads(event["body"]).get("reason") == "invalid_config", event)
-                        check(self.leases(host, key) == 0 and self.leases(host, "") == 0, "损坏配置不得回退或计数")
-                return "10种 Redis 字段损坏返回内部500，两个计数池均为空，网关业务200"
+                        check(self.leases(key=key) == 0 and self.leases(key="") == 0, "损坏配置产生计数")
+                return "10种损坏配置内部500，网关业务200，不回退或创建租约"
             finally:
-                self.delete(host, key)
-                self.delete(host)
-        self.run_case("GW-Redis配置损坏fail-open", corrupt_config)
+                self.delete(self.service, key);self.delete(self.service)
+        self.run_case("GW-损坏规则fail-open", corrupt)
 
-        def domain_isolation():
-            self.config("*.isolated.e2e.test", "")
-            host1, host2 = "one.isolated.e2e.test", "two.isolated.e2e.test"
-            future = self.pool.submit(self.gateway, 0, host1, None, {"stream": True, "hold_seconds": 1.5})
-            eventually(lambda: self.leases(host1, "") == 1)
-            check(self.gateway(pod=1, host=host2)["status"] == 200, "子域共享了额度")
-            check(self.gateway(pod=1, host=host1)["status"] == 429, "同域未限流")
-            check(future.result()["status"] == 200, "原流失败")
-            self.idle(host1, "")
-            self.delete("*.isolated.e2e.test")
-            return "共享通配规则的不同实际子域各自计数"
-        self.run_case("GW-通配域名计数隔离", domain_isolation)
+        def direct_response():
+            self.control(clear=True)
+            response = self.gateway(host="no-route.test")
+            check(response["status"] == 404, response)
+            check(not self.events("acquire"), "无转发目标仍调用了acquire")
+            return "无匹配路由时保留网关404，不发送acquire"
+        self.run_case("GW-无上游路由目标放行", direct_response)
+
+        def upstream_errors():
+            for status in (429, 500, 503):
+                self.control(clear=True)
+                response = self.gateway(key=self.key, data={"response_status": status})
+                check(response["status"] == status and response["body"] == {"error": "upstream fixture error"}, response)
+                events = self.events("acquire", upstream_cluster=self.cluster(), api_key=self.key)
+                check(events and json.loads(events[-1]["body"]).get("allowed") is True, events)
+                self.idle()
+            return "上游自身429/500/503及响应体原样透传，acquire明确允许"
+        self.run_case("GW-上游错误原样透传", upstream_errors)
 
     def metric_cases(self):
         def json_usage():
@@ -714,7 +709,7 @@ class Suite:
         self.run_case("MET-SSE非法帧", invalid_frame)
 
         def invalid_uid():
-            self.config(self.host, "abc")
+            self.config(self.service, "abc")
             before = sum(self.metric("llm_prompt_tokens_total", uid) for uid in ("basic_001", "premium_001", "__other__"))
             response = self.gateway(key="abc", data={"stream": True})
             check(response["status"] == 200, response)
@@ -729,7 +724,7 @@ class Suite:
 
         def cardinality():
             host = "overflow.e2e.test"
-            self.config(host, "", 100)
+            self.config(self.service, "", 100)
             before = self.metric("llm_prompt_tokens_total", "__other__", host)
             for n in range(24):
                 check(self.gateway(host=host, key=jwt(f"overflow_{n}"))["status"] == 200, n)
@@ -772,12 +767,12 @@ class Suite:
                 try:
                     response = self.gateway(key=self.key)
                     check(response["status"] == 200, response)
-                    event = eventually(lambda: self.events("acquire", domain=self.host, api_key=self.key))[-1]
+                    event = eventually(lambda: self.events("acquire", upstream_cluster=self.cluster(), api_key=self.key))[-1]
                     lease = json.loads(event["body"])["lease_id"]
                     eventually(lambda: self.redis("EXISTS", "rl:lease:" + lease) == "0")
                     # Expired ZSET members are removed by the next acquire, not
                     # by Redis key expiry alone. Verify that production path.
-                    recovered = self.acquire(self.host, self.key)["body"]
+                    recovered = self.acquire(self.service, self.key)["body"]
                     check(recovered.get("allowed") is True and recovered.get("current_count") == 1, recovered)
                     self.release(recovered["lease_id"])
                     self.idle()
@@ -792,13 +787,13 @@ class Suite:
                 self.control(renew=mode, clear=True)
                 try:
                     future = self.pool.submit(self.gateway, 0, None, self.key, {"stream": True, "hold_seconds": 3})
-                    event = eventually(lambda: self.events("acquire", domain=self.host, api_key=self.key))[-1]
+                    event = eventually(lambda: self.events("acquire", upstream_cluster=self.cluster(), api_key=self.key))[-1]
                     lease = json.loads(event["body"])["lease_id"]
                     eventually(lambda: self.events("renew", lease_id=lease))
                     response = future.result(timeout=10)
                     check(response["status"] == 200 and "[DONE]" in response["raw"], response)
                     check(self.redis("EXISTS", "rl:lease:" + lease) == "0", "失败续约的租约未过期")
-                    recovered = self.acquire(self.host, self.key)["body"]
+                    recovered = self.acquire(self.service, self.key)["body"]
                     check(recovered.get("allowed") is True and recovered.get("current_count") == 1,
                           {"expired_lease": lease, "next_acquire": recovered})
                     self.release(recovered["lease_id"])
@@ -818,7 +813,7 @@ class Suite:
         def counter_response():
             started = time.monotonic()
             try:
-                direct = self.acquire(self.host, self.key)
+                direct = self.acquire(self.service, self.key)
             except (OSError, http.client.HTTPException) as exc:
                 detail = {"error": type(exc).__name__, "message": str(exc),
                           "seconds": round(time.monotonic() - started, 3)}
@@ -835,7 +830,7 @@ class Suite:
             started = time.monotonic()
             response = self.gateway(key=self.key)
             elapsed = time.monotonic() - started
-            events = self.events("acquire", domain=self.host, api_key=self.key)
+            events = self.events("acquire", upstream_cluster=self.cluster(), api_key=self.key)
             self.save("redis-outage-gateway.json", {"response": response,
                       "seconds": round(elapsed, 3), "acquire_events": events})
             check(response["status"] == 200 and response["body"].get("id") == "e2e-upstream", response)
@@ -873,7 +868,7 @@ class Suite:
             self.k("-n", self.ns, "scale", "deployment/redis", "--replicas=1")
             self.k("-n", self.ns, "rollout", "status", "deployment/redis", "--timeout=90s", timeout=100)
             # 测试 Redis 使用临时数据，恢复后重新初始化以验证恢复路径。
-            eventually(lambda: self.api("/config", {"domain": self.host, "api_key": self.key,
+            eventually(lambda: self.api("/config", {"service": self.service, "port": 8080, "api_key": self.key,
                 "max_concurrent": 1, "enabled": True}, "PUT")["status"] == 200, 30)
 
         def recovery():
@@ -887,7 +882,7 @@ class Suite:
         sequence = 0
         # During LDS/ECDS convergence the preceding healthy plugin can still
         # enforce its policy. Start from an explicit allow rule, not a missing rule.
-        self.config(self.host, self.key, 100)
+        self.config(self.service, self.key, 100)
         check(self.gateway(key=self.key)["status"] == 200, "加载故障测试前的业务基线失败")
         self.idle()
 
@@ -1009,7 +1004,7 @@ class Suite:
         finally:
             self.k("apply", "-f", "-", data={"apiVersion": "v1", "kind": "List", "items": original})
             self.assert_limiter_active()
-            self.config(self.host, self.key, 1)
+            self.config(self.service, self.key, 1)
 
     def evidence(self):
         self.save("resources.json", json.loads(self.k("-n", self.ns, "get",
@@ -1034,7 +1029,7 @@ class Suite:
                 process.wait()
             log.close()
         if self.created and not self.args.keep:
-            self.k("delete", "namespace", self.ns, "--wait=true", "--timeout=60s", timeout=70)
+            self.k("delete", "namespace", self.ns, self.peer_ns, "--ignore-not-found=true", "--wait=true", "--timeout=60s", timeout=70)
             self.cleaned = True
         after = self.inventory()
         self.save("cluster-after.json", after)

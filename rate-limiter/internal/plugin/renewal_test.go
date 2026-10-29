@@ -21,8 +21,7 @@ import (
 	"rate-limiter-wasm/rate-limiter/internal/counter-service/redis"
 )
 
-const renewalTestConfig = `domains: [api.example.com]
-distributed_limit:
+const renewalTestConfig = `distributed_limit:
   enabled: true
   backend: counter_service
   counter_service:
@@ -49,7 +48,7 @@ func newRenewalHost(t *testing.T, prepare func(*rootContext)) (*rootContext, pro
 		prepare(root)
 	}
 	host, reset := proxytest.NewHostEmulator(proxytest.NewEmulatorOption().
-		WithVMContext(&renewalTestVM{root: root}).WithPluginConfiguration([]byte(renewalTestConfig)))
+		WithProperty([]string{"cluster_name"}, []byte("outbound|8000||inference.ai.svc.cluster.local")).WithVMContext(&renewalTestVM{root: root}).WithPluginConfiguration([]byte(renewalTestConfig)))
 	t.Cleanup(reset)
 	require.Equal(t, types.OnPluginStartStatusOK, host.StartPlugin())
 	return root, host, &now
@@ -170,7 +169,7 @@ func TestDelayedAcquireReschedulesRenewalAfterConfigUpdate(t *testing.T) {
 		tickPeriod uint32
 	}{
 		{"longer TTL", renewalTestConfig, 100},
-		{"distributed disabled", "domains: [api.example.com]\nrate_limits:\n  - api_key: key001\n    max_concurrent: 1\n", 100},
+		{"distributed disabled", "distributed_limit:\n  enabled: false\n", 100},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, host, now := newRenewalHost(t, nil)
@@ -258,10 +257,10 @@ func TestRenewalDispatchFailureRetriesAndBoundsTimeout(t *testing.T) {
 
 func TestLongRequestAcrossMultipleTTLsThroughCounterService(t *testing.T) {
 	t.Run("key rule", func(t *testing.T) { testLongRequestThroughCounterService(t, false) })
-	t.Run("domain rule without credentials", func(t *testing.T) { testLongRequestThroughCounterService(t, true) })
+	t.Run("service default rule without credentials", func(t *testing.T) { testLongRequestThroughCounterService(t, true) })
 }
 
-func testLongRequestThroughCounterService(t *testing.T, domainOnly bool) {
+func testLongRequestThroughCounterService(t *testing.T, defaultOnly bool) {
 	_, host, now := newRenewalHost(t, nil)
 	mr := miniredis.RunT(t)
 	mr.SetTime(*now)
@@ -269,11 +268,11 @@ func testLongRequestThroughCounterService(t *testing.T, domainOnly bool) {
 	require.NoError(t, err)
 	t.Cleanup(func() { client.Close() })
 	apiKey := "key001"
-	if domainOnly {
+	if defaultOnly {
 		apiKey = ""
 	}
 	require.NoError(t, client.SetConfig(context.Background(), models.RateLimitConfig{
-		Domain: "api.example.com", APIKey: apiKey, MaxConcurrent: 1, Enabled: true,
+		Service: "ai/inference", Port: 8000, APIKey: apiKey, MaxConcurrent: 1, Enabled: true,
 	}))
 	mux := http.NewServeMux()
 	mux.Handle("/acquire", handler.NewAcquireHandler(client))
@@ -292,7 +291,7 @@ func testLongRequestThroughCounterService(t *testing.T, domainOnly bool) {
 	}
 	first := host.InitializeHttpContext()
 	headers := [][2]string{{":authority", "api.example.com"}}
-	if !domainOnly {
+	if !defaultOnly {
 		headers = append(headers, [2]string{"authorization", "Bearer key001"})
 	}
 	require.Equal(t, types.ActionPause, host.CallOnRequestHeaders(first, headers, false))

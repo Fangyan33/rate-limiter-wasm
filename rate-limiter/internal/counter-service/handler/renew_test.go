@@ -28,9 +28,9 @@ func TestRenewHandler(t *testing.T) {
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			acquire, _, mr := setupTestHandler(t)
-			setTestConfig(t, acquire.redisClient, "api.example.com", "key001", 1, true)
-			lease, err := acquire.redisClient.Acquire(context.Background(), models.AcquireRequest{
-				Domain: "api.example.com", APIKey: "key001", TTLMS: 3000,
+			setTestConfig(t, acquire.redisClient, "ai/inference", "key001", 1, true)
+			lease, err := acquire.redisClient.Acquire(context.Background(), models.ServiceAcquireRequest{
+				Port: 8000, Service: "ai/inference", APIKey: "key001", TTLMS: 3000,
 			})
 			require.NoError(t, err)
 			switch scenario.name {

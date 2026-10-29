@@ -1,49 +1,10 @@
-# Rate Limiter Plugin Configuration
-#
-# 分布式限流模式（推荐）：
-# - 限流配置存储在 Redis 中，通过 Counter Service 配置管理 API 动态管理
-# - 支持按 domain + api_key 维度配置，支持通配符域名匹配
-# - api_key 为空或省略时按实际请求域名共享总并发额度，不要求 Authorization
-# - 配置变更实时生效，无需重启插件
-#
-# 配置管理示例：
-#   curl -X PUT http://counter-service:8080/config \
-#     -H "Content-Type: application/json" \
-#     -d '{"domain":"api.example.com","api_key":"key001","max_concurrent":5,"enabled":true}'
-# 仅按域名限流：
-#   curl -X PUT http://counter-service:8080/config \
-#     -H "Content-Type: application/json" \
-#     -d '{"domain":"api.example.com","api_key":"","max_concurrent":10,"enabled":true}'
-
-domains:
-  - api.example.com
-  - "*.example.com"  # 支持通配符域名
-
-# rate_limits 配置项已废弃（分布式模式下）
-# 所有限流配置通过 Counter Service API 管理，存储在 Redis:
-#   - 配置键格式: rl:config:{domain}:{sha256(api_key)}
-#   - 先查具体 key（精确 > *.parent > *），再查空 key 的域名规则（同样顺序）
-#   - 禁用逐条跳过，无规则放行；启用规则超限才拒绝，不回退
-#   - enabled 缺失/非法或启用阈值损坏返回内部 500，网关 fail-open
-#   - 计数按实际域名 + key 隔离，域名规则单独共享；域名统一小写
-#   - 配置字段: max_concurrent, enabled（必填布尔值）, description（省略保留、空串清空）
-#   - 写请求如含 api_key_hash，必须等于 SHA256(api_key)，否则 400；查询不返回 api_key
-#
-# 如需使用本地限流模式，请设置 distributed_limit.enabled: false
-# 并取消注释以下 rate_limits 配置：
-#
-# rate_limits:
-#   - api_key: key_basic_001
-#     max_concurrent: 2
-#   - api_key: key_premium_001
-#     max_concurrent: 5
-#
-# 本地模式仅按域名限流时，改用以下规则；每个命中 domains 的实际域名独立计数：
-# rate_limits:
-#   - api_key: ""
-#     max_concurrent: 10
-# 具体 key 优先；没有匹配规则则放行，空 rate_limits 也合法。
-
+# Wasm 只读取并发送原始路由目标，Counter Service 转换服务标识。
+# 无需配置入口域名；额度通过 Counter Service 的 /config 接口管理：
+# {"service":"default/nginx-file-server-svc","port":80,"api_key":"key001","max_concurrent":5,"enabled":true}
+# service 只接受 namespace/name；port 是 Service port，不是 targetPort。
+# api_key 省略或为空时，作为该服务端口的默认共享额度。
+# enabled=false 或缺失规则跳过；调用、解析和依赖故障均放行。
+# distributed_limit.enabled=false 直接透传，不执行本地限流。
 distributed_limit:
   enabled: true
   backend: counter_service
@@ -54,7 +15,6 @@ distributed_limit:
     renew_path: /renew
     timeout_ms: 5000
     lease_ttl_ms: 30000
-
 error_response:
   status_code: 429
   message: Rate limit exceeded

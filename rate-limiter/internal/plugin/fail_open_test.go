@@ -133,25 +133,8 @@ func TestInitializationPanicDisablesPluginWithoutFailingStartup(t *testing.T) {
 	root, host, _ := newRenewalHost(t, func(root *rootContext) {
 		root.setTickPeriod = func(uint32) error { panic("timer hostcall failed") }
 	})
-	require.Nil(t, root.matcher)
+	require.False(t, root.asyncDistributed)
 	id := host.InitializeHttpContext()
 	require.Equal(t, types.ActionContinue, host.CallOnRequestHeaders(id, [][2]string{{":authority", "api.example.com"}}, false))
 	require.Nil(t, host.GetSentLocalResponse(id))
-}
-
-type panickingLimiter struct{}
-
-func (panickingLimiter) AcquireForDomain(string, string) (func(), bool) {
-	panic("local limiter failed")
-}
-
-func TestLocalLimiterAndReleasePanicsDoNotInterruptBusiness(t *testing.T) {
-	root, host, _ := newRenewalHost(t, nil)
-	root.asyncDistributed = false
-	root.limiter = panickingLimiter{}
-	id := host.InitializeHttpContext()
-	require.Equal(t, types.ActionContinue, host.CallOnRequestHeaders(id, [][2]string{{":authority", "api.example.com"}}, false))
-	require.Nil(t, host.GetSentLocalResponse(id))
-	h := &httpContext{root: root, release: func() { panic("release failed") }}
-	require.NotPanics(t, h.OnHttpStreamDone)
 }

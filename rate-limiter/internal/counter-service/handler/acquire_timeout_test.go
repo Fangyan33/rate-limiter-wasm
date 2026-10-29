@@ -66,7 +66,7 @@ func TestAcquireHandler_RedisFailureReturns503OverHTTP(t *testing.T) {
 
 			started := time.Now()
 			response, err := httpClient.Post(httpServer.URL+"/acquire", "application/json",
-				bytes.NewBufferString(`{"domain":"api.example.com","api_key":"key","ttl_ms":30000}`))
+				bytes.NewBufferString(`{"upstream_cluster":"outbound|8000||inference.ai.svc.cluster.local","api_key":"key","ttl_ms":30000}`))
 			if err != nil {
 				t.Fatalf("/acquire 未返回完整 HTTP 响应: %v", err)
 			}

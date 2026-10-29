@@ -34,29 +34,29 @@ func setupTestHandler(t *testing.T) (*AcquireHandler, *ReleaseHandler, *miniredi
 	return acquireHandler, releaseHandler, mr
 }
 
-func setTestConfig(t *testing.T, client *redis.Client, domain, apiKey string, limit int, enabled bool) {
+func setTestConfig(t *testing.T, client *redis.Client, service, apiKey string, limit int, enabled bool) {
 	t.Helper()
 	if err := client.SetConfig(context.Background(), models.RateLimitConfig{
-		Domain: domain, APIKey: apiKey, MaxConcurrent: limit, Enabled: enabled,
+		Port: 8000, Service: service, APIKey: apiKey, MaxConcurrent: limit, Enabled: enabled,
 	}); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func testConfigKey(domain, apiKey string) string {
+func testConfigKey(service, apiKey string) string {
 	sum := sha256.Sum256([]byte(apiKey))
-	return "rl:config:" + domain + ":" + hex.EncodeToString(sum[:])
+	return "rl:service:config:" + service + ":8000:" + hex.EncodeToString(sum[:])
 }
 
 func TestAcquireHandler_Success(t *testing.T) {
 	handler, _, _ := setupTestHandler(t)
 
-	setTestConfig(t, handler.redisClient, "api.example.com", "test-key", 5, true)
+	setTestConfig(t, handler.redisClient, "ai/inference", "test-key", 5, true)
 
 	reqBody := map[string]interface{}{
-		"domain":  "api.example.com",
-		"api_key": "test-key",
-		"ttl_ms":  30000,
+		"upstream_cluster": "outbound|8000||inference.ai.svc.cluster.local",
+		"api_key":          "test-key",
+		"ttl_ms":           30000,
 	}
 	body, _ := json.Marshal(reqBody)
 
@@ -87,12 +87,12 @@ func TestAcquireHandler_Success(t *testing.T) {
 func TestAcquireHandler_LimitReached(t *testing.T) {
 	handler, _, _ := setupTestHandler(t)
 
-	setTestConfig(t, handler.redisClient, "api.example.com", "test-key", 2, true)
+	setTestConfig(t, handler.redisClient, "ai/inference", "test-key", 2, true)
 
 	reqBody := map[string]interface{}{
-		"domain":  "api.example.com",
-		"api_key": "test-key",
-		"ttl_ms":  30000,
+		"upstream_cluster": "outbound|8000||inference.ai.svc.cluster.local",
+		"api_key":          "test-key",
+		"ttl_ms":           30000,
 	}
 
 	// Acquire twice to reach limit
@@ -140,9 +140,9 @@ func TestAcquireHandler_ConfigMiss(t *testing.T) {
 	handler, _, _ := setupTestHandler(t)
 
 	reqBody := map[string]interface{}{
-		"domain":  "api.example.com",
-		"api_key": "missing-config-key",
-		"ttl_ms":  30000,
+		"upstream_cluster": "outbound|8000||inference.ai.svc.cluster.local",
+		"api_key":          "missing-config-key",
+		"ttl_ms":           30000,
 	}
 	body, _ := json.Marshal(reqBody)
 
@@ -168,12 +168,12 @@ func TestAcquireHandler_ConfigMiss(t *testing.T) {
 func TestAcquireHandler_DisabledConfig(t *testing.T) {
 	handler, _, _ := setupTestHandler(t)
 
-	setTestConfig(t, handler.redisClient, "api.example.com", "disabled-key", 5, false)
+	setTestConfig(t, handler.redisClient, "ai/inference", "disabled-key", 5, false)
 
 	reqBody := map[string]interface{}{
-		"domain":  "api.example.com",
-		"api_key": "disabled-key",
-		"ttl_ms":  30000,
+		"upstream_cluster": "outbound|8000||inference.ai.svc.cluster.local",
+		"api_key":          "disabled-key",
+		"ttl_ms":           30000,
 	}
 	body, _ := json.Marshal(reqBody)
 
@@ -199,12 +199,12 @@ func TestAcquireHandler_DisabledConfig(t *testing.T) {
 func TestAcquireHandler_InvalidConfig(t *testing.T) {
 	handler, _, mr := setupTestHandler(t)
 
-	mr.HSet(testConfigKey("api.example.com", "invalid-config-key"), "max_concurrent", "0", "enabled", "true")
+	mr.HSet(testConfigKey("ai/inference", "invalid-config-key"), "max_concurrent", "0", "enabled", "true")
 
 	reqBody := map[string]interface{}{
-		"domain":  "api.example.com",
-		"api_key": "invalid-config-key",
-		"ttl_ms":  30000,
+		"upstream_cluster": "outbound|8000||inference.ai.svc.cluster.local",
+		"api_key":          "invalid-config-key",
+		"ttl_ms":           30000,
 	}
 	body, _ := json.Marshal(reqBody)
 
@@ -254,17 +254,17 @@ func TestAcquireHandler_ValidationError(t *testing.T) {
 		{
 			name: "empty domain",
 			reqBody: map[string]interface{}{
-				"domain":  "",
-				"api_key": "test-key",
-				"ttl_ms":  30000,
+				"upstream_cluster": "",
+				"api_key":          "test-key",
+				"ttl_ms":           30000,
 			},
 		},
 		{
 			name: "invalid ttl_ms",
 			reqBody: map[string]interface{}{
-				"domain":  "api.example.com",
-				"api_key": "test-key",
-				"ttl_ms":  0,
+				"upstream_cluster": "outbound|8000||inference.ai.svc.cluster.local",
+				"api_key":          "test-key",
+				"ttl_ms":           0,
 			},
 		},
 	}
@@ -288,12 +288,12 @@ func TestAcquireHandler_ValidationError(t *testing.T) {
 func TestAcquireHandler_LeaseExpiredAutoRecovery(t *testing.T) {
 	handler, _, mr := setupTestHandler(t)
 
-	setTestConfig(t, handler.redisClient, "api.example.com", "test-key", 1, true)
+	setTestConfig(t, handler.redisClient, "ai/inference", "test-key", 1, true)
 
 	reqBody := map[string]interface{}{
-		"domain":  "api.example.com",
-		"api_key": "test-key",
-		"ttl_ms":  100,
+		"upstream_cluster": "outbound|8000||inference.ai.svc.cluster.local",
+		"api_key":          "test-key",
+		"ttl_ms":           100,
 	}
 
 	body1, _ := json.Marshal(reqBody)
@@ -327,66 +327,6 @@ func TestAcquireHandler_LeaseExpiredAutoRecovery(t *testing.T) {
 	}
 }
 
-func TestAcquireHandler_WildcardFallback(t *testing.T) {
-	handler, _, _ := setupTestHandler(t)
-
-	setTestConfig(t, handler.redisClient, "*.example.com", "test-key", 3, true)
-
-	reqBody := map[string]interface{}{
-		"domain":  "api.example.com",
-		"api_key": "test-key",
-		"ttl_ms":  30000,
-	}
-	body, _ := json.Marshal(reqBody)
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/acquire", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-
-	handler.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", w.Code)
-	}
-
-	var resp map[string]interface{}
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-	if allowed, ok := resp["allowed"].(bool); !ok || !allowed {
-		t.Fatalf("expected allowed=true, got %#v", resp["allowed"])
-	}
-}
-
-func TestAcquireHandler_GlobalFallback(t *testing.T) {
-	handler, _, _ := setupTestHandler(t)
-
-	setTestConfig(t, handler.redisClient, "*", "test-key", 4, true)
-
-	reqBody := map[string]interface{}{
-		"domain":  "any.domain.com",
-		"api_key": "test-key",
-		"ttl_ms":  30000,
-	}
-	body, _ := json.Marshal(reqBody)
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/acquire", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-
-	handler.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", w.Code)
-	}
-
-	var resp map[string]interface{}
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-	if allowed, ok := resp["allowed"].(bool); !ok || !allowed {
-		t.Fatalf("expected allowed=true, got %#v", resp["allowed"])
-	}
-}
-
 func TestAcquireHandler_RedisNetworkError(t *testing.T) {
 	handler, _, mr := setupTestHandler(t)
 
@@ -394,9 +334,9 @@ func TestAcquireHandler_RedisNetworkError(t *testing.T) {
 	mr.Close()
 
 	reqBody := map[string]interface{}{
-		"domain":  "api.example.com",
-		"api_key": "test-key",
-		"ttl_ms":  30000,
+		"upstream_cluster": "outbound|8000||inference.ai.svc.cluster.local",
+		"api_key":          "test-key",
+		"ttl_ms":           30000,
 	}
 	body, _ := json.Marshal(reqBody)
 

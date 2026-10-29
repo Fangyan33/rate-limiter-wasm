@@ -19,7 +19,7 @@ func (c *Client) SetConfig(ctx context.Context, cfg models.RateLimitConfig) erro
 		return err
 	}
 
-	key := c.Key(fmt.Sprintf("config:%s:%s", cfg.Domain, hashAPIKey(cfg.APIKey)))
+	key := c.configKey(cfg.Service, cfg.Port, hashAPIKey(cfg.APIKey))
 
 	fields := map[string]interface{}{
 		"max_concurrent": cfg.MaxConcurrent,
@@ -42,12 +42,11 @@ func (c *Client) SetConfig(ctx context.Context, cfg models.RateLimitConfig) erro
 }
 
 // GetConfig 获取单个配置
-func (c *Client) GetConfig(ctx context.Context, domain, apiKey string) (*models.ConfigView, error) {
-	domain = models.NormalizeDomain(domain)
-	if domain == "" {
-		return nil, models.ErrEmptyDomain
+func (c *Client) GetConfig(ctx context.Context, service string, port int, apiKey string) (*models.ConfigView, error) {
+	if err := models.ValidateService(service, port); err != nil {
+		return nil, err
 	}
-	key := c.Key(fmt.Sprintf("config:%s:%s", domain, hashAPIKey(apiKey)))
+	key := c.configKey(service, port, hashAPIKey(apiKey))
 
 	result, err := c.rdb.HGetAll(ctx, key).Result()
 	if err != nil {
@@ -57,10 +56,10 @@ func (c *Client) GetConfig(ctx context.Context, domain, apiKey string) (*models.
 		return nil, nil // 不存在返回 nil
 	}
 
-	return configView(domain, hashAPIKey(apiKey), result)
+	return configView(service, port, hashAPIKey(apiKey), result)
 }
 
-func configView(domain, hash string, fields map[string]string) (*models.ConfigView, error) {
+func configView(service string, port int, hash string, fields map[string]string) (*models.ConfigView, error) {
 	if fields["enabled"] != "true" && fields["enabled"] != "false" {
 		return nil, fmt.Errorf("%w: enabled must be true or false", ErrInvalidConfig)
 	}
@@ -70,18 +69,17 @@ func configView(domain, hash string, fields map[string]string) (*models.ConfigVi
 	}
 	updatedAt, _ := strconv.ParseInt(fields["updated_at"], 10, 64)
 	return &models.ConfigView{
-		Domain: domain, APIKeyHash: hash, MaxConcurrent: limit,
+		Service: service, Port: port, APIKeyHash: hash, MaxConcurrent: limit,
 		Enabled: fields["enabled"] == "true", Description: fields["description"], UpdatedAt: updatedAt,
 	}, nil
 }
 
 // DeleteConfig 删除指定配置
-func (c *Client) DeleteConfig(ctx context.Context, domain, apiKey string) error {
-	domain = models.NormalizeDomain(domain)
-	if domain == "" {
-		return models.ErrEmptyDomain
+func (c *Client) DeleteConfig(ctx context.Context, service string, port int, apiKey string) error {
+	if err := models.ValidateService(service, port); err != nil {
+		return err
 	}
-	key := c.Key(fmt.Sprintf("config:%s:%s", domain, hashAPIKey(apiKey)))
+	key := c.configKey(service, port, hashAPIKey(apiKey))
 	return c.rdb.Del(ctx, key).Err()
 }
 
@@ -124,13 +122,16 @@ func (c *Client) ListConfigs(ctx context.Context, pattern string, cursor uint64,
 	configs := make([]models.ConfigView, 0, len(page))
 	for _, item := range page {
 		key := item["key"]
-		// 解析 key 为 domain:api_key_hash
-		identity := strings.TrimPrefix(key, c.prefix+"config:")
-		separator := strings.LastIndexByte(identity, ':')
-		if separator <= 0 {
+		identity := strings.TrimPrefix(key, c.Key("service:config:"))
+		parts := strings.Split(identity, ":")
+		if len(parts) != 3 {
 			return nil, fmt.Errorf("%w: malformed config key", ErrInvalidConfig)
 		}
-		view, err := configView(identity[:separator], identity[separator+1:], item)
+		port, err := strconv.Atoi(parts[1])
+		if err != nil || strconv.Itoa(port) != parts[1] || models.ValidateService(parts[0], port) != nil || len(parts[2]) != 64 {
+			return nil, fmt.Errorf("%w: malformed config key", ErrInvalidConfig)
+		}
+		view, err := configView(parts[0], port, parts[2], item)
 		if err != nil {
 			return nil, err
 		}

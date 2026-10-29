@@ -7,15 +7,11 @@ import (
 // Atomic policy selection, lease accounting and lifecycle scripts.
 const (
 	acquireScript = `-- acquire_with_config.lua (ZSET model)
--- KEYS[1]: config_key        (rl:config:<domain>:<api_key_sha256>)
--- KEYS[2]: leases_key        (rl:leases:<domain>:<api_key_sha256>)
--- KEYS[3]: lease_key         (rl:lease:<lease_id>)
--- KEYS[4]: wildcard_config_key
--- KEYS[5]: global_config_key
--- KEYS[6]: domain_config_key (empty API key hash)
--- KEYS[7]: wildcard_domain_config_key
--- KEYS[8]: global_domain_config_key
--- KEYS[9]: domain_leases_key (actual request domain, empty API key hash)
+-- KEYS[1]: specific service-port config (empty when there is no API key)
+-- KEYS[2]: specific service-port leases
+-- KEYS[3]: lease pointer
+-- KEYS[4]: service-port default config (empty API key hash)
+-- KEYS[5]: service-port default leases
 -- ARGV[1]: lease_ttl_ms
 -- ARGV[2]: lease_id
 
@@ -34,10 +30,10 @@ local function get_config(key)
     return result
 end
 
--- Resolve specific-key rules first, then domain rules. Disabled entries are skipped.
+-- Resolve specific-key rules first, then the service-port default. Disabled entries are skipped.
 local config = nil
 local leases_key = nil
-for _, index in ipairs({1, 4, 5, 6, 7, 8}) do
+for _, index in ipairs({1, 4}) do
     local candidate = get_config(KEYS[index])
     if candidate then
         if candidate.enabled ~= "true" and candidate.enabled ~= "false" then
@@ -50,7 +46,7 @@ for _, index in ipairs({1, 4, 5, 6, 7, 8}) do
                 return cjson.encode({allowed = false, reason = "invalid_config", message = "Invalid max_concurrent configuration"})
             end
             config = candidate
-            leases_key = index <= 5 and KEYS[2] or KEYS[9]
+            leases_key = index == 1 and KEYS[2] or KEYS[5]
             break
         end
     end
@@ -129,7 +125,7 @@ return cjson.encode({renewed = true})
 `
 
 	listConfigsScript = `-- list_configs.lua
--- KEYS[1]: pattern (rl:config:*)
+-- KEYS[1]: pattern (rl:service:config:*)
 -- ARGV[1]: cursor
 -- ARGV[2]: count
 

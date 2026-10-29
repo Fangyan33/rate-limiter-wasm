@@ -10,224 +10,8 @@ import (
 	"github.com/tetratelabs/proxy-wasm-go-sdk/proxywasm/types"
 )
 
-func TestRootContextLoadsValidatedConfig(t *testing.T) {
-	root := plugin.NewRootContext()
-
-	err := root.LoadConfiguration([]byte(`domains:
-  - api.example.com
-rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 2
-error_response:
-  message: denied
-`))
-	if err != nil {
-		t.Fatalf("LoadConfiguration() error = %v", err)
-	}
-
-	cfg := root.Config()
-	if len(cfg.Domains) != 1 || cfg.Domains[0] != "api.example.com" {
-		t.Fatalf("unexpected domains: %#v", cfg.Domains)
-	}
-}
-
-func TestRootContextRejectsInvalidConfig(t *testing.T) {
-	root := plugin.NewRootContext()
-
-	if err := root.LoadConfiguration([]byte(`domains: []`)); err == nil {
-		t.Fatal("expected invalid config to be rejected")
-	}
-}
-
-func TestRootContextStartsWithZeroValueConfig(t *testing.T) {
-	root := plugin.NewRootContext()
-
-	cfg := root.Config()
-	if len(cfg.Domains) != 0 {
-		t.Fatalf("expected empty domains on zero value config, got %#v", cfg.Domains)
-	}
-	if len(cfg.RateLimits) != 0 {
-		t.Fatalf("expected empty rate limits on zero value config, got %#v", cfg.RateLimits)
-	}
-}
-
-func TestPluginBypassesUnmatchedDomain(t *testing.T) {
-	host, reset := newHTTPHost(t)
-	defer reset()
-
-	contextID := host.InitializeHttpContext()
-	action := host.CallOnRequestHeaders(contextID, [][2]string{
-		{":authority", "other.example.com"},
-	}, false)
-	if action != types.ActionContinue {
-		t.Fatalf("expected continue for unmatched domain, got %v", action)
-	}
-	if resp := host.GetSentLocalResponse(contextID); resp != nil {
-		t.Fatalf("expected no local response for unmatched domain, got %#v", resp)
-	}
-}
-
-func TestPluginAllowsMissingAuthorizationWithoutDomainRule(t *testing.T) {
-	host, reset := newHTTPHost(t)
-	defer reset()
-
-	contextID := host.InitializeHttpContext()
-	action := host.CallOnRequestHeaders(contextID, [][2]string{
-		{":authority", "api.example.com"},
-	}, false)
-	if action != types.ActionContinue || host.GetSentLocalResponse(contextID) != nil {
-		t.Fatal("no rule must pass through")
-	}
-}
-
-func TestPluginAllowsUnknownAPIKeyWithoutDomainRule(t *testing.T) {
-	host, reset := newHTTPHost(t)
-	defer reset()
-
-	unknownID := host.InitializeHttpContext()
-	unknownAction := host.CallOnRequestHeaders(unknownID, [][2]string{
-		{":authority", "api.example.com"},
-		{"authorization", "Bearer unknown_key"},
-	}, false)
-	if unknownAction != types.ActionContinue || host.GetSentLocalResponse(unknownID) != nil {
-		t.Fatal("unknown key must pass through without a domain rule")
-	}
-
-	allowedID := host.InitializeHttpContext()
-	allowedAction := host.CallOnRequestHeaders(allowedID, [][2]string{
-		{":authority", "api.example.com"},
-		{"authorization", "Bearer key_basic_001"},
-	}, false)
-	if allowedAction != types.ActionContinue {
-		t.Fatalf("expected configured api key to continue after unknown key bypass, got %v", allowedAction)
-	}
-}
-
-func TestPluginRejectsWhenConcurrentLimitReached(t *testing.T) {
-	host, reset := newHTTPHost(t)
-	defer reset()
-
-	firstID := host.InitializeHttpContext()
-	firstAction := host.CallOnRequestHeaders(firstID, [][2]string{
-		{":authority", "api.example.com"},
-		{"authorization", "Bearer key_basic_001"},
-	}, false)
-	if firstAction != types.ActionContinue {
-		t.Fatalf("expected first request to continue, got %v", firstAction)
-	}
-	if resp := host.GetSentLocalResponse(firstID); resp != nil {
-		t.Fatalf("expected no local response for first request, got %#v", resp)
-	}
-
-	secondID := host.InitializeHttpContext()
-	secondAction := host.CallOnRequestHeaders(secondID, [][2]string{
-		{":authority", "api.example.com"},
-		{"authorization", "Bearer key_basic_001"},
-	}, false)
-	assertRejected(t, host, secondID, secondAction, 429, "Rate limit exceeded")
-
-	host.CompleteHttpContext(secondID)
-	host.CompleteHttpContext(firstID)
-
-	thirdID := host.InitializeHttpContext()
-	thirdAction := host.CallOnRequestHeaders(thirdID, [][2]string{
-		{":authority", "api.example.com"},
-		{"authorization", "Bearer key_basic_001"},
-	}, false)
-	if thirdAction != types.ActionContinue {
-		t.Fatalf("expected request after rejected stream completion and original release to continue, got %v", thirdAction)
-	}
-}
-
-func TestPluginReleasesSlotOnStreamDone(t *testing.T) {
-	host, reset := newHTTPHost(t)
-	defer reset()
-
-	firstID := host.InitializeHttpContext()
-	firstAction := host.CallOnRequestHeaders(firstID, [][2]string{
-		{":authority", "api.example.com"},
-		{"authorization", "Bearer key_basic_001"},
-	}, false)
-	if firstAction != types.ActionContinue {
-		t.Fatalf("expected first request to continue, got %v", firstAction)
-	}
-
-	host.CompleteHttpContext(firstID)
-
-	secondID := host.InitializeHttpContext()
-	secondAction := host.CallOnRequestHeaders(secondID, [][2]string{
-		{":authority", "api.example.com"},
-		{"authorization", "Bearer key_basic_001"},
-	}, false)
-	if secondAction != types.ActionContinue {
-		t.Fatalf("expected second request after stream done to continue, got %v", secondAction)
-	}
-	if resp := host.GetSentLocalResponse(secondID); resp != nil {
-		t.Fatalf("expected no local response after release, got %#v", resp)
-	}
-}
-
-func TestPluginWaitsForCounterServiceWithoutApplyingLocalLimit(t *testing.T) {
-	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
-  - api.example.com
-rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 1
-distributed_limit:
-  enabled: true
-  backend: counter_service
-  counter_service:
-    cluster: ratelimit-service
-    acquire_path: /acquire
-    release_path: /release
-    lease_ttl_ms: 30000
-error_response:
-  status_code: 429
-  message: Rate limit exceeded
-`))
-	defer reset()
-
-	// The distributed path waits for the remote decision and does not use
-	// the configured local limit as a fallback.
-	firstID := host.InitializeHttpContext()
-	firstAction := host.CallOnRequestHeaders(firstID, [][2]string{
-		{":authority", "api.example.com"},
-		{"authorization", "Bearer key_basic_001"},
-	}, false)
-	if firstAction != types.ActionPause {
-		t.Fatalf("expected first request to pause for async distributed acquire, got %v", firstAction)
-	}
-	if resp := host.GetSentLocalResponse(firstID); resp != nil {
-		t.Fatalf("expected no local response while acquire decision is pending, got %#v", resp)
-	}
-}
-
-func TestRootContextRejectsInvalidCounterServiceConfig(t *testing.T) {
-	root := plugin.NewRootContext()
-
-	err := root.LoadConfiguration([]byte(`domains:
-  - api.example.com
-rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 1
-distributed_limit:
-  enabled: true
-  backend: counter_service
-  counter_service:
-    cluster: ""
-`))
-	if err == nil {
-		t.Fatal("expected invalid counter_service config to be rejected")
-	}
-}
-
 func TestPluginPausesRequestWhileCounterServiceAcquireIsPending(t *testing.T) {
-	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
-  - api.example.com
-rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 1
-distributed_limit:
+	host, reset := newHTTPHostWithConfig(t, []byte(`distributed_limit:
   enabled: true
   backend: counter_service
   counter_service:
@@ -256,12 +40,7 @@ error_response:
 }
 
 func TestPluginResumesRequestWhenCounterServiceAcquireSucceeds(t *testing.T) {
-	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
-  - api.example.com
-rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 1
-distributed_limit:
+	host, reset := newHTTPHostWithConfig(t, []byte(`distributed_limit:
   enabled: true
   backend: counter_service
   counter_service:
@@ -303,12 +82,7 @@ error_response:
 }
 
 func TestPluginDispatchesCounterServiceReleaseOnStreamDone(t *testing.T) {
-	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
-  - api.example.com
-rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 1
-distributed_limit:
+	host, reset := newHTTPHostWithConfig(t, []byte(`distributed_limit:
   enabled: true
   backend: counter_service
   counter_service:
@@ -374,12 +148,7 @@ error_response:
 }
 
 func TestPluginResumesRequestWhenAsyncAcquireReturnsNon200(t *testing.T) {
-	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
-  - api.example.com
-rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 1
-distributed_limit:
+	host, reset := newHTTPHostWithConfig(t, []byte(`distributed_limit:
   enabled: true
   backend: counter_service
   counter_service:
@@ -441,12 +210,7 @@ error_response:
 }
 
 func TestPluginResumesRequestWhenAsyncAcquireResponseIsInvalidJSON(t *testing.T) {
-	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
-  - api.example.com
-rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 1
-distributed_limit:
+	host, reset := newHTTPHostWithConfig(t, []byte(`distributed_limit:
   enabled: true
   backend: counter_service
   counter_service:
@@ -485,12 +249,7 @@ error_response:
 }
 
 func TestPluginDoesNotDispatchReleaseWhenAcquireFailedOpen(t *testing.T) {
-	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
-  - api.example.com
-rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 1
-distributed_limit:
+	host, reset := newHTTPHostWithConfig(t, []byte(`distributed_limit:
   enabled: true
   backend: counter_service
   counter_service:
@@ -528,12 +287,7 @@ error_response:
 }
 
 func TestPluginRejectsRequestWhenCounterServiceAcquireDenies(t *testing.T) {
-	host, reset := newHTTPHostWithConfig(t, []byte(`domains:
-  - api.example.com
-rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 1
-distributed_limit:
+	host, reset := newHTTPHostWithConfig(t, []byte(`distributed_limit:
   enabled: true
   backend: counter_service
   counter_service:
@@ -575,25 +329,12 @@ error_response:
 	}
 }
 
-func newHTTPHost(t *testing.T) (proxytest.HostEmulator, func()) {
-	t.Helper()
-
-	return newHTTPHostWithConfig(t, []byte(`domains:
-  - api.example.com
-rate_limits:
-  - api_key: key_basic_001
-    max_concurrent: 1
-error_response:
-  status_code: 429
-  message: Rate limit exceeded
-`))
-}
-
 func newHTTPHostWithConfig(t *testing.T, cfg []byte) (proxytest.HostEmulator, func()) {
 	t.Helper()
 
 	opt := proxytest.NewEmulatorOption().
 		WithVMContext(plugin.NewVMContext()).
+		WithProperty([]string{"cluster_name"}, []byte("outbound|8000||inference.ai.svc.cluster.local")).
 		WithPluginConfiguration(cfg)
 
 	host, reset := proxytest.NewHostEmulator(opt)

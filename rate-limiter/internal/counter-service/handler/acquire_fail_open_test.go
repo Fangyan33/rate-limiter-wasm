@@ -14,7 +14,7 @@ func TestAcquireInternalFailureIsNotAPolicyDenial(t *testing.T) {
 	mr.SetError("ERR injected script failure")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/acquire",
-		strings.NewReader(`{"domain":"api.example.com","ttl_ms":30000}`)))
+		strings.NewReader(`{"upstream_cluster":"outbound|8000||inference.ai.svc.cluster.local","ttl_ms":30000}`)))
 	require.Equal(t, http.StatusInternalServerError, w.Code)
 	require.JSONEq(t, `{"allowed":false,"reason":"internal_error","message":"eval acquire script: ERR injected script failure"}`, w.Body.String())
 }

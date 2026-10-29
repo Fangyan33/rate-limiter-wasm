@@ -3,21 +3,14 @@ package plugin
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"rate-limiter-wasm/rate-limiter/internal/config"
-	"rate-limiter-wasm/rate-limiter/internal/limiter"
 	"rate-limiter-wasm/shared/auth"
-	sharedmatcher "rate-limiter-wasm/shared/matcher"
 
 	proxywasm "github.com/tetratelabs/proxy-wasm-go-sdk/proxywasm"
 	types "github.com/tetratelabs/proxy-wasm-go-sdk/proxywasm/types"
 )
-
-type requestLimiter interface {
-	AcquireForDomain(domain, apiKey string) (func(), bool)
-}
 
 type vmContext struct {
 	types.DefaultVMContext
@@ -26,8 +19,6 @@ type vmContext struct {
 type rootContext struct {
 	types.DefaultPluginContext
 	cfg              config.Config
-	matcher          *sharedmatcher.DomainMatcher
-	limiter          requestLimiter
 	counterService   config.CounterServiceConfig
 	asyncDistributed bool
 	activeLeases     map[string]*activeLease
@@ -46,7 +37,6 @@ type rootContext struct {
 type httpContext struct {
 	types.DefaultHttpContext
 	root               *rootContext
-	release            func()
 	distributedAPIKey  string
 	distributedLeaseID string
 	counterService     config.CounterServiceConfig
@@ -101,17 +91,10 @@ func (r *rootContext) LoadConfiguration(data []byte) error {
 		return fmt.Errorf("load configuration: %w", err)
 	}
 
-	domainMatcher, err := sharedmatcher.NewDomainMatcher(cfg.Domains)
-	if err != nil {
-		return fmt.Errorf("build domain matcher: %w", err)
-	}
-
 	r.cfg = cfg
-	r.matcher = domainMatcher
 	r.counterService = cfg.DistributedLimit.CounterService
 	r.asyncDistributed = cfg.DistributedLimit.Enabled &&
 		cfg.DistributedLimit.Backend == "counter_service"
-	r.limiter = limiter.NewLocalLimiter(buildLimits(cfg.RateLimits))
 	if r.activeLeases == nil {
 		r.activeLeases = make(map[string]*activeLease)
 	}
@@ -124,8 +107,6 @@ func (r *rootContext) LoadConfiguration(data []byte) error {
 
 func (r *rootContext) disable() {
 	r.cfg = config.Config{}
-	r.matcher = nil
-	r.limiter = nil
 	r.asyncDistributed = false
 }
 
@@ -134,14 +115,6 @@ func (r *rootContext) recoverRoot(operation string) {
 		r.disable()
 		safeLogCriticalf("%s panic: %v; rate limiting disabled", operation, recovered)
 	}
-}
-
-func buildLimits(rateLimits []config.RateLimit) map[string]int {
-	limits := make(map[string]int, len(rateLimits))
-	for _, limit := range rateLimits {
-		limits[limit.APIKey] = limit.MaxConcurrent
-	}
-	return limits
 }
 
 func (r *rootContext) Config() config.Config {
@@ -160,51 +133,38 @@ func (h *httpContext) OnHttpRequestHeaders(numHeaders int, endOfStream bool) (ac
 			action = types.ActionContinue
 		}
 	}()
-	if h.root == nil || h.root.matcher == nil || h.root.limiter == nil {
+	if h.root == nil || !h.root.asyncDistributed || !h.root.renewalReady {
 		return types.ActionContinue
 	}
 
-	host, err := proxywasm.GetHttpRequestHeader(":authority")
-	if err != nil || !h.root.matcher.Match(normalizeHost(host)) {
+	cluster, err := proxywasm.GetProperty([]string{"cluster_name"})
+	if err != nil || len(cluster) == 0 || len(cluster) > 1024 {
 		return types.ActionContinue
 	}
 
-	// A domain-only rule also applies to missing or malformed credentials.
+	// The service-port default rule also applies to missing or malformed credentials.
 	// Leave authentication parsing unchanged for other plugins.
 	var apiKey string
 	if authorization, err := proxywasm.GetHttpRequestHeader("authorization"); err == nil {
 		apiKey, _ = auth.ParseBearerToken(authorization)
 	}
 
-	if h.root.asyncDistributed {
-		if !h.root.renewalReady {
-			return types.ActionContinue
-		}
-		h.distributedAPIKey = apiKey
-		return h.dispatchAcquire(normalizeHost(host), apiKey)
-	}
-
-	release, ok := h.root.limiter.AcquireForDomain(normalizeHost(host), apiKey)
-	if !ok {
-		return h.reject()
-	}
-
-	h.release = release
-	return types.ActionContinue
+	h.distributedAPIKey = apiKey
+	return h.dispatchAcquire(string(cluster), apiKey)
 }
 
-func (h *httpContext) dispatchAcquire(domain, apiKey string) types.Action {
+func (h *httpContext) dispatchAcquire(cluster, apiKey string) types.Action {
 	cs := h.root.counterService
 	h.counterService = cs
 	h.acquireStartedAt = h.root.currentTime()
 	body, _ := json.Marshal(struct {
-		Domain string `json:"domain"`
-		APIKey string `json:"api_key"`
-		TTLMS  int64  `json:"ttl_ms"`
+		UpstreamCluster string `json:"upstream_cluster"`
+		APIKey          string `json:"api_key"`
+		TTLMS           int64  `json:"ttl_ms"`
 	}{
-		Domain: domain,
-		APIKey: apiKey,
-		TTLMS:  int64(cs.LeaseTTLMS),
+		UpstreamCluster: cluster,
+		APIKey:          apiKey,
+		TTLMS:           int64(cs.LeaseTTLMS),
 	})
 
 	timeout := calloutTimeout(cs.TimeoutMS)
@@ -250,10 +210,6 @@ func (h *httpContext) OnHttpStreamDone() {
 		}
 	}()
 	h.clearPendingAcquire()
-	if h.release != nil {
-		h.release()
-		h.release = nil
-	}
 
 	if h.distributedLeaseID == "" || h.root == nil {
 		return
@@ -449,15 +405,4 @@ func calloutTimeout(configuredMS int) uint32 {
 		return 5000
 	}
 	return uint32(configuredMS)
-}
-
-func normalizeHost(host string) string {
-	host = strings.TrimSpace(strings.ToLower(host))
-	if host == "" {
-		return ""
-	}
-	if idx := strings.Index(host, ":"); idx >= 0 {
-		return host[:idx]
-	}
-	return host
 }

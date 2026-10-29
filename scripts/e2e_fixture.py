@@ -112,6 +112,8 @@ class Handler(BaseHTTPRequestHandler):
                                         "body": data.decode()})
             return self.reply(status, data)
 
+        if payload.get("response_status") in (429, 500, 503):
+            return self.reply(payload["response_status"], {"error": "upstream fixture error"})
         received = {"body": payload, "headers": dict(self.headers)}
         usage = {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}
         if not payload.get("stream"):

@@ -1,108 +1,106 @@
 # 当前限流契约
 
-本文说明 `rate-limiter`、Counter Service 和 Redis 当前共同遵循的行为。部署命令见 [README](../../README.md)，隔离集群测试见 [Kubernetes E2E](../k8s-e2e.md)。历史设计文件保留用于追溯，不作为当前实施步骤。
+本文是 `rate-limiter`、Counter Service 和 Redis 的当前共同契约。部署见 [README](../../README.md)，隔离测试见 [Kubernetes E2E](../k8s-e2e.md)。项目未正式上线，直接使用本契约，不提供旧协议兼容或数据迁移。历史设计文档仅用于追溯。
 
-`token-stats` 已废弃、停止维护，后续将完整移除；代码、构建和既有部署清单暂时保留，不属于限流功能或本次验收范围。
+`token-stats` 已废弃，保留既有代码、构建和部署清单，不属于本次功能或验收范围。
 
-## 匹配与放行
+## 服务身份与路由转换
 
-网关仅处理 `domains` 命中的请求。具体 API Key 从 Bearer 中提取，缺失或格式错误时视为没有可用 key，不承担身份认证职责。
+额度身份是 `service + port + API Key`：service仅支持小写的 `命名空间/Service名称`，例如 `ai/inference`；port为必填的Service端口（1～65535整数），不是Pod的targetPort。不同命名空间、服务、端口的额度隔离；多个入口域名和同服务的不同subset共享额度。
 
-按以下顺序逐条查询候选规则：
+Wasm在请求头阶段读取Envoy的 `cluster_name` 属性，原样发送，不解析服务名称，不查询Kubernetes API或DNS。没有域名白名单，也没有本地限流模式。关闭分布式限流时透传；读取失败、空目标或超过1024字节时直接放行。
 
-1. 精确域名 + 具体 API Key。
-2. 直接父域通配 + 具体 API Key。
-3. 全局通配 `*` + 具体 API Key。
-4. 精确域名 + 空 key。
-5. 直接父域通配 + 空 key。
-6. 全局通配 `*` + 空 key。
+Counter Service识别 `outbound|port|subset|service.namespace.svc.<集群域>`，转换为namespace/name和port，忽略subset。`KUBERNETES_CLUSTER_DOMAIN`默认 `cluster.local`，可设置其他集群域；配置非法时记录日志并停用服务识别，HTTP服务和Wasm下载仍可用。不支持的cluster或非Kubernetes目标返回 `{"allowed":true}`，不访问Redis、不分配租约。
 
-没有有效 key 时只执行后三步。缺失记录和 `enabled=false` 的记录跳过，继续下一步。禁用具体 key 后可匹配同 key 通配或域名规则；全部候选不存在或被禁用时直接放行，不占用任何额度。
+VirtualService可以填写短名称或FQDN；短名称的namespace由VirtualService自身所在namespace决定，实际匹配使用Istio解析后的目标，与入口Host无关。
 
-启用规则一旦命中就使用该规则的额度，达到上限时拒绝，不继续回退。具体 key 额度按实际请求域名 + key 隔离；空 key 额度按实际域名共享。通配配置不建立跨域共享池，两类额度不叠加。
+## 规则与额度池
 
-Redis 通配查找只使用直接父域，例如 `a.b.example.com` 查询 `*.b.example.com` 和 `*`，不会递归查询 `*.example.com`。网关 `domains` 的后缀通配是进入插件的条件，与 Redis 查找层级不同。
+按顺序查询：
 
-本地静态模式同样先选具体 key，再选空 key，每个实际域名独立计数；规则为空或未匹配时放行。静态模式没有 Redis 的 enabled 字段，删除配置项即可停止该规则。本地配置重新加载会创建新的计数器，不保证在途计数平滑保留。
+1. 精确service + port + 具体API Key。
+2. 相同service + port + 空API Key的默认规则。
 
-## 配置写入与查询
+不存在、enabled=false的规则跳过。启用规则一旦命中，额度不足就拒绝，不再回退。全部未匹配时正常放行，不分配租约。
 
-`PUT /config` 示例：
+Bearer缺失或格式错误时视为没有可用Key，只查询默认规则。插件不承担认证职责。具体Key与默认规则是独立池，默认规则供未命中具体Key的请求共享，不叠加为服务总并发上限。
+
+## 配置管理接口
+
+PUT `/config`：
 
 ```json
-{
-  "domain": "api.example.com",
-  "api_key": "key001",
-  "max_concurrent": 2,
-  "enabled": true,
-  "description": "接口并发额度"
-}
+{"service":"ai/inference","port":8000,"api_key":"key001","max_concurrent":10,"enabled":true,"description":"推理并发额度"}
 ```
 
-- `domain` 在 CRUD 和 acquire 中去首尾空格并转为小写，不能为空。
-- `api_key` 可省略或为空字符串，表示域名规则；非空值按原始字节计算摘要，不自动去空格或改大小写。
-- `max_concurrent` 必须为正整数，`enabled` 必须显式提供布尔值。缺失或非法启用状态不能被默认为禁用。
-- `api_key_hash` 可选；出现时必须严格等于 `SHA256(api_key)` 的小写十六进制摘要。空值、null、类型错误或不匹配返回 400。
-- `description` 省略时保留旧描述，非空字符串覆盖，显式空字符串清空；更新原子完成。
-- `tier` 已删除，写入携带该字段返回 400。可选字段出现时不接受 null。
-- 校验失败不执行 Redis 写入，也不修改更新时间。项目未上线，不提供旧数据迁移或兼容分支。
+- service必须为合法的小写namespace/name，不接受裸名称、FQDN或通配符。
+- port必填且为1～65535整数；max_concurrent为正整数，enabled必须显式提供布尔值。
+- api_key可省略或为空，按原始字节计算SHA256，不去空格、不改大小写。
+- api_key_hash可选，出现时必须严格等于SHA256(api_key)的小写十六进制摘要。
+- description省略保留原值，非空覆盖，空串删除；字段出现时不接受null。
+- 未知字段（包括domain、tier）、未知或重复查询参数返回400；校验失败不写Redis。
 
-`GET /config?domain=...&api_key=...` 和 `GET /configs?cursor=0&limit=100` 的配置对象只返回 `domain`、`api_key_hash`、`max_concurrent`、`enabled`、可选 description 和更新时间，完全没有 `api_key` 或 tier 字段。单项查询和删除仍通过明文 api_key 查询参数定位，服务端计算摘要。
+GET/DELETE `/config?service=ai/inference&port=8000&api_key=key001` 定位规则。不存在的单项查询返回404，删除幂等。
 
-列表只支持 cursor/limit，不支持 domain 筛选。必须遍历到 cursor="0"；空页返回 configs=[]，不代表本轮结束。
+GET `/configs?cursor=0&limit=100` 只支持cursor/limit。配置对象返回service、port、api_key_hash、max_concurrent、enabled、可选description、updated_at，不返回明文api_key。必须翻页到cursor="0"，空页仍返回configs=[]并保留游标。
 
-不能直接把具体 key 的查询对象 PUT 回去：没有原始 key 时，其 hash 与空 key 不一致，必须返回 400；编辑时需要补入原始 key。域名规则的 hash 与空 key 一致，省略 key 可通过校验。
+编辑具体Key时提供原始Key；查询对象不是写入对象，直接回写应被拒绝。
 
-## Redis 数据结构
+## 运行时接口
+
+POST `/acquire`：
+
+```json
+{"upstream_cluster":"outbound|8000||inference.ai.svc.cluster.local","api_key":"key001","ttl_ms":30000}
+```
+
+upstream_cluster为1～1024字节，ttl_ms为正整数。接口不接收service/port覆盖转换结果，没有domain字段。成功占用额度返回allowed=true、lease_id、max_concurrent和current_count；无匹配启用规则或无法识别的目标只返回allowed=true。
+
+POST `/renew` 接收lease_id和正整数ttl_ms，返回renewed。POST `/release` 接收lease_id和可选api_key，返回released。二者均通过租约指针定位原额度池，不重新识别路由。释放幂等，续约不复活已经释放或过期的租约。
+
+## Redis 结构
 
 ```text
-rl:config:<domain>:<sha256(api_key)>  Hash
-rl:leases:<actual_domain>:<sha256(selected_key)>  ZSET
-rl:lease:<lease_id>  String，值为对应 leases key，带 TTL
+rl:service:config:<namespace/name>:<port>:<sha256(api_key)>       Hash
+rl:service:leases:<namespace/name>:<port>:<sha256(selected_key)> ZSET
+rl:lease:<lease_id>                                           String，带TTL，指向leases键
 ```
 
-`selected_key` 在具体 key 规则下是请求 key，在域名规则下是空字符串。配置 Hash 只写 max_concurrent、enabled、description、updated_at，不保存明文 API Key；api_key_hash 由 Redis key 后缀解析或计算后返回，不是单独存储字段。
+REDIS_KEY_PREFIX可替换默认rl:。配置Hash只存max_concurrent、enabled、description、updated_at，不存明文Key或冗余身份字段。默认规则使用sha256("")，具体Key规则使用请求Key摘要。
 
-```text
-sha256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-```
+acquire通过Lua原子选择规则、使用Redis TIME清理过期ZSET成员、判定额度并创建租约。指针TTL到期不代表ZSET成员自动消失，由后续acquire清理。renew同时延长指针和ZSET成员有效期，release移除两者。
 
-空 key 规则仍有非空摘要，这是正常标识。具体 key 与空 key 的配置是两条独立记录，互不覆盖。
+规则变更只影响后续acquire；在途租约始终续约和释放原集合，不追溯合并额度。
 
-计数从 ZSET 中导出。acquire 使用 Redis TIME 清理过期成员后判定额度；租约指针自身 TTL 到期不代表 ZSET 成员自动消失，后续 acquire 会清理。release 幂等；renew 同时延长指针及成员有效期，不复活已释放、已过期租约。
-
-动态规则切换只影响后续 acquire，已有租约继续在原集合续约和释放，不追溯合并两个计数池。
-
-## Counter Service 与故障边界
+## 故障边界
 
 | 场景 | 接口结果 | 网关行为 |
 | --- | --- | --- |
-| 命中启用规则且有额度 | 200 + allowed=true + lease_id | 转发，续约和结束释放 |
-| 无启用的匹配规则 | 200 + allowed=true，无 lease_id | 正常转发，不续约、不释放 |
-| 启用规则明确超限 | 200 + allowed=false + reason=limit_exceeded | 按 error_response 拒绝，默认429、text/plain |
-| Redis 候选 enabled 缺失或不是精确 true/false | 500 + allowed=false + reason=invalid_config | fail-open，不继续回退或计数 |
-| 启用规则阈值缺失或不是正整数 | 同上 | 同上 |
-| Redis 网络或操作超时 | 503 + allowed=false + reason=redis_unavailable | fail-open |
-| 非法 HTTP 请求 | 400/405 | 插件收到非200时 fail-open |
+| 启用规则有额度 | 200，allowed=true，有lease_id | 转发并续约，结束释放 |
+| 无启用规则或无法识别目标 | 200，allowed=true，无lease_id | 转发，不续约、不释放 |
+| 启用规则明确超限 | 200，allowed=false，reason=limit_exceeded | 按error_response拒绝，默认429 |
+| 候选enabled缺失/非法，启用阈值损坏 | 500，allowed=false，reason=invalid_config | 放行，不继续回退或计数 |
+| Redis网络故障或操作超时 | 503，allowed=false，reason=redis_unavailable | 放行 |
+| 非法请求 | 400/405 | Wasm收到非200时放行 |
 
-查询遇到损坏配置返回内部500；列表页包含损坏配置时整页报错，不把损坏状态显示为 enabled=false。合法 enabled=false 的候选直接跳过，不评估其阈值。
+合法enabled=false的规则不评估其阈值。查询或列表遇到损坏配置返回500，不把损坏状态显示为禁用。
 
-`config_not_found`、`api_key_disabled` 不再作为拒绝结果。Wasm 收到带这些原因的 allowed=false 时也放行；唯一有效的策略拒绝原因是 limit_exceeded。
+Wasm调用失败、非200、超时、空体、非法JSON、缺少布尔allowed、未知拒绝原因和超大响应均放行。唯一可拒绝业务的结果是HTTP200 + allowed=false + limit_exceeded，不回退本地限流。
 
-Wasm dispatch 失败、非200、超时、空体、非法JSON、缺布尔 allowed、未知原因、超大响应均放行，不回退本地限流。Counter Service acquire 的 Redis 操作共用500ms预算；暂停请求由独立看门狗恢复并忽略迟到的拒绝。续约或释放失败不改变业务响应。
+acquire的Redis连接、执行和重试共用500ms预算。Wasm有独立暂停看门狗，恢复后忽略迟到拒绝；续约和释放错误不影响业务响应。业务上游自身错误原样透传。
 
-保留 ECDS、Lua透传默认配置、fail_open=true 和 nack_on_code_cache_miss=true。插件初始化失败禁用功能并返回启动成功，下载服务启动不依赖 Redis。先发布 Counter Service，再发布 Wasm 与匹配摘要。
+保留ECDS、Lua透传默认配置、fail_open=true和nack_on_code_cache_miss=true；插件业务配置错误禁用功能并返回启动成功。Counter Service的Wasm下载不依赖Redis健康。
 
 ## 验证
 
 ```bash
 go test -race -count=1 -p=1 ./shared/... ./rate-limiter/... ./token-stats/...
-make image VERSION=rules-local DIST_DIR=dist/rules-build
-kind load docker-image counter-service:rules-local --name kind
-python3 -B scripts/k8s_e2e.py \
-  --context kind-kind --image counter-service:rules-local \
-  --artifacts dist/rules-build/rules-local/linux-amd64 \
-  --rate-limiter-only --output dist/e2e/rules-local
+go test ./rate-limiter/internal/counter-service/models -run '^$' -bench ParseUpstreamCluster -benchmem
+make artifacts VERSION=service-rules-local
+kind load docker-image counter-service:service-rules-local --name kind
+python3 -B scripts/k8s_e2e.py --context kind-kind --rate-limiter-only \
+  --image counter-service:service-rules-local \
+  --artifacts dist/service-rules-local/linux-amd64 --output dist/e2e/service-rules-local
 ```
 
-Go 命令包含已废弃模块的现有编译和测试，不表示恢复维护。限流专项 E2E 只部署限流插件，通过实际占用槽位验证插件已激活；不依赖缺规则拒绝或 Token 指标。隔离集群验证与生产容量、长期稳定性、实际业务验收分别记录。
+Go测试包含已废弃模块的既有回归，不表示恢复维护。真实E2E通过占满租约后的429确认插件激活，并核对实际cluster、acquire载荷与服务端口额度池；不能仅凭业务200判断限流有效。本地功能、制品检查与生产容量/稳定性验收分别记录。
