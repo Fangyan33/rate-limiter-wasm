@@ -1,122 +1,40 @@
-# rate-limiter-wasm e2e 测试需求文档
+# rate-limiter-wasm E2E 测试要求
 
-> 日期：2026-03-24
-> 状态：Draft v1（用于后续自动化实现）
-> 约束：本阶段仅产出需求与用例蓝图，不修改业务代码
+本文件按当前实现更新，原2026-03-24草稿中的“缺规则/禁用即拒绝”和统计验收要求已替代。行为规范见[当前限流契约](../specs/rate-limiting-contract.md)，执行方法见[Kubernetes E2E](../k8s-e2e.md)。
 
-## 1. 目标
+## 验证目标
 
-为项目建立可落地的端到端（e2e）测试体系，覆盖以下真实运行路径：
+验证 Counter Service + Redis、双副本 Istio 网关 + 真实 Wasm + 模拟业务上游。仅命中插件 domains 的请求进入限流，域名之外直接旁路。
 
-1. Counter Service + Redis 服务链路
-2. Istio Ingress + WASM 插件 + Counter Service + Redis + Upstream 的完整数据面链路
-3. Token 统计与指标暴露链路（含 Istio 1.13 `extraStatTags`）
+具体 key 按精确域名、直接父域、全局顺序查找，再查空 key 的相同三级域名规则；禁用逐条跳过，无规则直接放行。启用规则超限才按 error_response 拒绝，默认429、text/plain；配置损坏或基础设施故障 fail-open，不回退本地限流。
 
-测试目标不是“验证设计理想状态”，而是优先验证**当前实现语义**，并把与 PRD 历史表述不一致之处显式化。
+## 必测行为
 
-## 2. 实现基线（当前代码语义）
+1. CRUD 与分页：配置键使用SHA256，查询JSON无api_key/tier；分页直到cursor=0，空页返回数组。
+2. 写入校验：enabled必填布尔；hash如出现必须等于SHA256(api_key)；空值/null/错误类型或不匹配返回400，Redis原记录和时间戳不变；tier写入400。
+3. 域名统一小写；description省略保留、非空覆盖、空串删除。
+4. 六级匹配顺序、跳过禁用规则、未知/缺失/非法凭证回退域名，无候选时200放行且不产生租约。
+5. 具体key超限后不借用域名额度；具体key和域名池分别计数，同key跨域独立计数。
+6. 并发、释放幂等、TTL过期清理、续约、长流和跨副本全局一致性。规则切换不合并原有租约池。
+7. 直接破坏Redis enabled及启用阈值时内部500、网关业务继续，不能把损坏状态显示或解释成明确禁用。
+8. Counter Service dispatch、非200、超时、空体、非法/超大响应、缺allowed、旧禁用/缺配置原因等故障均放行。renew/release故障不影响业务响应。
+9. Redis实际停机后直接acquire在800ms内得到完整内部503，网关收到该503后继续上游请求；恢复后正常限流。
+10. ECDS默认透传、下载故障、无效配置/模块、初始化失败、运行时trap、无下载源冷启动；期间两个副本业务不中断。
 
-以下行为作为 e2e 验收基线：
+## 环境与数据
 
-1. 仅命中 `domains` 的请求进入鉴权/限流/统计；未命中域名直接 bypass。
-2. 分布式模式为异步 callout：请求先 pause，等待 `/acquire` 回调。
-3. Counter Service 返回非 200 或返回体不可解析时，插件采用 **fail-open**（恢复请求继续）。
-4. 只有 `/acquire` 返回 `200 + {allowed:false}` 时，插件本地拒绝请求。
-5. 插件拒绝响应格式为：`HTTP 429 + text/plain; charset=utf-8 + error_response.message`。
-6. Counter Service `Acquire` 的业务拒绝（如 `limit_exceeded`、`config_not_found`、`api_key_disabled`）默认是 `HTTP 200 + allowed=false`。
-7. Counter Service `Acquire` 仅 Redis 不可用时返回 `503 + reason=redis_unavailable`。
-8. Redis 配置匹配优先级：精确 > wildcard > 全局。
-9. 采用 ZSET 租约模型，需验证 TTL 到期后自动恢复并发槽位。
-10. Token 统计支持：
-   - 非流式 JSON usage 提取
-   - SSE 增量 usage 提取
-   - `stream: true` 时请求体自动注入 `stream_options.include_usage=true`
-11. 指标内部命名格式：
-   - `llm.prompt_tokens_totaldomain=.=<domain>;.;uid=.=<uid>;.;`
-   - `llm.completion_tokens_totaldomain=.=<domain>;.;uid=.=<uid>;.;`
-   - `llm.stream_parse_errors_totaldomain=.=<domain>;.;uid=.=<uid>;.;`
+- 使用本地Kubernetes集群（当前context为 `kind-kind`），复用已有Istio控制面，创建独立命名空间、两个测试网关副本、临时Redis、Counter Service及HTTP/SSE fixture。
+- 先导入测试镜像，使用 `scripts/k8s_e2e.py --rate-limiter-only`。该模式不部署token-stats，也不要求extraStatTags。
+- 业务路由由脚本生成；人工演示资源在simple/nginx和simple/vllm-mock，不使用不存在的deploy/nginx或simple/istio.yaml路径。
+- 域名使用api.e2e.test及其余测试子域，未命中域使用unmatched.test。API Key只要求有效Bearer字符串，不要求JWT或uid。
+- 必须先创建实际规则并占满额度，验证两个副本均超限拒绝后清理探针，不能把透传默认配置当作Wasm已经激活。
 
-## 3. 测试范围
+## 验收与证据
 
-### 3.1 必测（P0）
+全部本轮限流断言通过，报告包含实际请求/响应、配置、日志、故障注入及资源清理结果。结束后原有Deployment/EnvoyFilter/ConfigMap配置与副本数保持一致。
 
-1. 配置 CRUD 与 Acquire/Release 主流程
-2. 并发超限、释放、幂等、TTL 自动恢复
-3. 域名命中与 bypass 边界
-4. Authorization 合法/非法分支
-5. 分布式后端异常 fail-open 行为
-6. token 统计（非流式 + SSE）
-7. Istio 1.13 指标标签（`domain`/`uid`）
+单元/race、静态清单、隔离集群功能验收分别记录；大规模容量、长时间稳定性和真实模型上游验收另行安排，不从旧报告推导当前通过。
 
-### 3.2 应测（P1）
+## 已废弃统计功能
 
-1. 多 ingress 副本全局并发一致性
-2. 配置热更新（新增/修改/删除）
-3. SSE 非法帧解析错误计数
-4. 指标 key 上限溢出到 `__other__`
-
-### 3.3 暂不纳入首批自动化（P2）
-
-1. 大规模压测（>10k QPS）
-2. 长时间 soak test（>12h）
-3. 混沌注入（网络抖动、随机丢包）
-
-## 4. 环境要求
-
-1. Kubernetes + Istio 1.13.x
-2. 至少 2 个 ingressgateway 副本（用于全局并发场景）
-3. 已部署：
-   - `deploy/istio/redis.yaml`
-   - `deploy/istio/counter-service-deployment.yaml`
-   - `deploy/istio/rate-limiter-envoyfilter.yaml`
-   - `deploy/nginx/*` + `simple/istio.yaml`
-4. Mesh Config 已合并：
-
-```yaml
-defaultConfig:
-  extraStatTags:
-    - domain
-    - uid
-```
-
-## 5. 测试数据规范
-
-1. Domain：
-   - `llm-demo.local`（主路径）
-   - `api.example.com`（精确）
-   - `foo.example.com`（wildcard）
-   - `unmatched.local`（bypass）
-2. API Key：
-   - `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoiYmFzaWNfMDAxIn0.g9q4PUCSic8zCWUoOGOJzlFctaWCU7NujZ1JddmqQpo`（uid=`basic_001`，limit=1）
-   - `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoicHJlbWl1bV8wMDEifQ.QlWcEWMaaEMBtgXfMZXxcq6QusqsWX8on8mfYf_d8jk`（uid=`premium_001`，limit=2）
-   - `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoiZGlzYWJsZWRfMDAxIn0.i888xyaHcVMxJ4VdPfeABUs-MLVgOTXiKq3CojjISE8`（uid=`disabled_001`，enabled=false）
-   - `key_eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMiwidWlkIjoibWlzc2luZ18wMDEifQ.TVdkapv2HwWXf5g1Ow6YVpHmMq43qP_LM__GuGwbifg`（uid=`missing_001`，无配置）
-3. uid 解析样本：
-   - 从 basic key 解析出 uid=`basic_001`
-   - 从 premium key 解析出 uid=`premium_001`
-   - 非法：非 JWT token（如 `abc`）
-
-## 6. 通过标准
-
-1. P0 用例通过率 100%
-2. P1 用例通过率 >= 95%
-3. 不允许出现并发槽位永久泄漏（TTL 恢复必须稳定）
-4. 指标验收以 `/stats/prometheus` 实际输出为准
-
-## 7. 交付物（后续实现阶段）
-
-1. `e2e` 自动化用例代码（按分层组织）
-2. 测试环境初始化脚本（导入配置、种子数据）
-3. CI 执行入口（P0 PR 必跑，P1 夜跑）
-4. 测试报告模板（失败样本请求/响应与指标快照）
-
-## 8. 与历史文档差异（已对齐当前实现）
-
-1. 分布式异常处理：由“本地降级限流”统一为 **fail-open**。
-2. 插件拒绝响应：由 JSON 示例统一为 **text/plain**。
-3. Acquire 拒绝状态码：业务拒绝以 `HTTP 200 + allowed=false` 为准（非 429/404）。
-4. 服务命名统一使用 `counter-service`。
-
-## 9. 下一步
-
-下一份文档《e2e 用例分解清单》给出逐条请求报文与断言字段，作为编码实现蓝图。
+token-stats停止维护，保留现有代码、构建、部署清单和旧完整测试入口，后续完整移除。UID精度、指标基数、usage注入或旧指标提取方案不再作为限流改动的设计、修复或验收要求。

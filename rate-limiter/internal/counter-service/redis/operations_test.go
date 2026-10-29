@@ -35,7 +35,6 @@ func TestAcquire_ExactMatch(t *testing.T) {
 	// 准备精确配置
 	s.HSet("rl:config:api.example.com:"+apiKeyHash, "max_concurrent", "5")
 	s.HSet("rl:config:api.example.com:"+apiKeyHash, "enabled", "true")
-	s.HSet("rl:config:api.example.com:"+apiKeyHash, "tier", "premium")
 
 	ctx := context.Background()
 	result, err := client.Acquire(ctx, models.AcquireRequest{
@@ -49,7 +48,6 @@ func TestAcquire_ExactMatch(t *testing.T) {
 	assert.NotEmpty(t, result.LeaseID)
 	assert.Equal(t, 5, result.MaxConcurrent)
 	assert.Equal(t, 1, result.CurrentCount)
-	assert.Equal(t, "premium", result.Tier)
 
 	members, err := s.ZMembers("rl:leases:api.example.com:" + apiKeyHash)
 	assert.NoError(t, err)
@@ -113,9 +111,9 @@ func TestAcquire_ConfigNotFound(t *testing.T) {
 		TTLMS:  30000,
 	})
 
-	assert.Error(t, err)
-	assert.False(t, result.Allowed)
-	assert.Equal(t, "config_not_found", result.Reason)
+	assert.NoError(t, err)
+	assert.True(t, result.Allowed)
+	assert.Empty(t, result.LeaseID)
 }
 
 func TestAcquire_APIKeyDisabled(t *testing.T) {
@@ -131,9 +129,9 @@ func TestAcquire_APIKeyDisabled(t *testing.T) {
 		TTLMS:  30000,
 	})
 
-	assert.Error(t, err)
-	assert.False(t, result.Allowed)
-	assert.Equal(t, "api_key_disabled", result.Reason)
+	assert.NoError(t, err)
+	assert.True(t, result.Allowed)
+	assert.Empty(t, result.LeaseID)
 }
 
 func TestAcquire_LimitExceeded(t *testing.T) {

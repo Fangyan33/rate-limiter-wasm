@@ -41,6 +41,9 @@ artifacts: image
 	docker save -o "$(OUTPUT_DIR)/counter-service-image.tar" "$(IMAGE)"
 	mkdir -p "$(OUTPUT_DIR)/deploy"
 	cp -R deploy/istio "$(OUTPUT_DIR)/deploy/"
+	cp -R docs "$(OUTPUT_DIR)/"
+	mkdir -p "$(OUTPUT_DIR)/scripts"
+	cp scripts/migrate-config-to-redis.sh "$(OUTPUT_DIR)/scripts/"
 	@for plugin in rate-limiter token-stats; do \
 		digest=$$(sha256sum "$(OUTPUT_DIR)/$$plugin.wasm" | cut -d ' ' -f 1); \
 		sed -i -E "s/^( *sha256:).*/\1 $$digest/" "$(OUTPUT_DIR)/deploy/istio/$$plugin-envoyfilter.yaml"; \

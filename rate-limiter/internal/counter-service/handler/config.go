@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -40,13 +41,19 @@ func (h *ConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // handlePutConfig 处理 PUT /config
 func (h *ConfigHandler) handlePutConfig(w http.ResponseWriter, r *http.Request) {
-	var cfg models.RateLimitConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+	var req models.ConfigWriteRequest
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&req); err != nil {
 		h.writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, "request must contain exactly one JSON object")
+		return
+	}
 
-	if err := cfg.Validate(); err != nil {
+	cfg, err := req.Config()
+	if err != nil {
 		h.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -61,7 +68,7 @@ func (h *ConfigHandler) handlePutConfig(w http.ResponseWriter, r *http.Request) 
 
 // handleGetConfig 处理 GET /config?domain=...&api_key=...
 func (h *ConfigHandler) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	domain := r.URL.Query().Get("domain")
+	domain := models.NormalizeDomain(r.URL.Query().Get("domain"))
 	apiKey := r.URL.Query().Get("api_key")
 
 	if domain == "" {
@@ -84,7 +91,7 @@ func (h *ConfigHandler) handleGetConfig(w http.ResponseWriter, r *http.Request) 
 
 // handleDeleteConfig 处理 DELETE /config?domain=...&api_key=...
 func (h *ConfigHandler) handleDeleteConfig(w http.ResponseWriter, r *http.Request) {
-	domain := r.URL.Query().Get("domain")
+	domain := models.NormalizeDomain(r.URL.Query().Get("domain"))
 	apiKey := r.URL.Query().Get("api_key")
 
 	if domain == "" {

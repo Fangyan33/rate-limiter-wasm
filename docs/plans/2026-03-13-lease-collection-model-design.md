@@ -1,5 +1,20 @@
 # Lease Collection Model Design
 
+> 状态：历史记录，已由[当前限流契约](../specs/rate-limiting-contract.md)替代。
+>
+> ZSET方案已落地并加入续约。Redis TIME 提供计时时钟，过期成员由后续 acquire 清理；指针TTL不会自行移除ZSET成员。当前键后缀为API Key摘要。
+
+## 当前行为修正
+
+- 具体 key 的精确、直接父域、全局规则优先，再按相同顺序匹配空 key 的域名规则；enabled=false 逐条跳过，最终无规则直接放行。
+- 只有命中启用规则后超限才拒绝；dispatch、Redis 或配置损坏均 fail-open，不转本地降级。损坏候选不回退。
+- Redis 配置键为 domain + SHA256(api_key)，并发占用为实际域名 + 选中key摘要的 ZSET；空 key 也有固定摘要。
+- 配置写入必须有布尔 enabled；如携带 api_key_hash 必须与原始key一致。查询对象没有 api_key，tier已删除，description省略保留、空串清空，域名统一小写。
+- token-stats 已废弃；当前限流验收使用 --rate-limiter-only，不依赖统计或旧指标提取配置。
+
+<details>
+<summary>原始历史设计与实施片段（已替代，不可作为当前指令执行）</summary>
+
 **Date:** 2026-03-13
 **Status:** Proposed
 **Author:** System Design
@@ -415,3 +430,5 @@ func (r *RedisOperations) Release(ctx context.Context, apiKey string, leaseID st
 	// ... 其余逻辑不变
 }
 ```
+
+</details>

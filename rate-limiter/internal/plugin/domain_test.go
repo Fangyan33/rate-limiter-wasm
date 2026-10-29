@@ -23,8 +23,6 @@ func TestLocalDomainRuleHandlesAllCredentials(t *testing.T) {
 rate_limits:
   - api_key: ""
     max_concurrent: 1
-  - api_key: known
-    max_concurrent: 100
 `))
 			defer reset()
 			first := host.InitializeHttpContext()
@@ -47,14 +45,15 @@ rate_limits:
 	}
 }
 
-func TestLocalKeyRulesStillRejectInvalidCredentials(t *testing.T) {
+func TestLocalKeyRulesAllowUnmatchedCredentials(t *testing.T) {
 	for _, authorization := range []string{"<missing>", "", "Bearer", "Bearer ", "Basic abc", "Bearer bad token"} {
 		t.Run(authorization, func(t *testing.T) {
 			host, reset := newHTTPHost(t)
 			defer reset()
 			id := host.InitializeHttpContext()
 			action := host.CallOnRequestHeaders(id, domainHeaders("api.example.com", authorization), false)
-			assertRejected(t, host, id, action, 429, "Rate limit exceeded")
+			require.Equal(t, types.ActionContinue, action)
+			require.Nil(t, host.GetSentLocalResponse(id))
 		})
 	}
 }
@@ -66,7 +65,7 @@ func TestDistributedDomainRequestAndDecision(t *testing.T) {
 			reject, release    bool
 		}{
 			{"allowed", "200", `{"allowed":true,"lease_id":"domain-lease"}`, false, true},
-			{"no rule", "200", `{"allowed":false,"reason":"config_not_found"}`, true, false},
+			{"no rule", "200", `{"allowed":true}`, false, false},
 			{"over limit", "200", `{"allowed":false,"reason":"limit_exceeded"}`, true, false},
 			{"service unavailable", "503", `{}`, false, false},
 			{"invalid response", "200", `{`, false, false},

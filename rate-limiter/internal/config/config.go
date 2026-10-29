@@ -124,10 +124,6 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	if !c.DistributedLimit.Enabled && len(c.RateLimits) == 0 {
-		return fmt.Errorf("rate_limits must not be empty when distributed_limit is disabled")
-	}
-
 	seen := make(map[string]struct{}, len(c.RateLimits))
 	for _, limit := range c.RateLimits {
 		if limit.APIKey != "" && strings.TrimSpace(limit.APIKey) == "" {

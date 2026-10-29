@@ -20,7 +20,6 @@ type AcquireResult struct {
 	Message       string `json:"message,omitempty"`
 	MaxConcurrent int    `json:"max_concurrent,omitempty"`
 	CurrentCount  int    `json:"current_count,omitempty"`
-	Tier          string `json:"tier,omitempty"`
 }
 
 type ReleaseResult struct {
@@ -31,8 +30,6 @@ type ReleaseResult struct {
 }
 
 var (
-	ErrConfigNotFound   = errors.New("config not found")
-	ErrAPIKeyDisabled   = errors.New("api key disabled")
 	ErrLimitExceeded    = errors.New("limit exceeded")
 	ErrInvalidConfig    = errors.New("invalid config")
 	ErrLeaseNotFound    = errors.New("lease not found")
@@ -41,10 +38,16 @@ var (
 
 // Acquire 执行原子获取并发槽位（调用 Lua acquire_with_config）
 func (c *Client) Acquire(ctx context.Context, req models.AcquireRequest) (*AcquireResult, error) {
+	if err := req.Validate(); err != nil {
+		return nil, err
+	}
 	leaseID := uuid.New().String()
 	apiKeyHash := hashAPIKey(req.APIKey)
 
-	keyConfigs := c.configKeys(req.Domain, apiKeyHash)
+	var keyConfigs [3]string
+	if req.APIKey != "" {
+		keyConfigs = c.configKeys(req.Domain, apiKeyHash)
+	}
 	domainHash := hashAPIKey("")
 	domainConfigs := c.configKeys(req.Domain, domainHash)
 	leasesKey := c.Key(fmt.Sprintf("leases:%s:%s", req.Domain, apiKeyHash))
@@ -78,10 +81,6 @@ func (c *Client) Acquire(ctx context.Context, req models.AcquireRequest) (*Acqui
 
 	if !res.Allowed {
 		switch res.Reason {
-		case "config_not_found":
-			return &res, ErrConfigNotFound
-		case "api_key_disabled":
-			return &res, ErrAPIKeyDisabled
 		case "limit_exceeded":
 			return &res, ErrLimitExceeded
 		case "invalid_config":

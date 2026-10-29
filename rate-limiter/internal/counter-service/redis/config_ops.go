@@ -9,18 +9,9 @@ import (
 	"strings"
 	"time"
 
+	goredis "github.com/redis/go-redis/v9"
 	"rate-limiter-wasm/rate-limiter/internal/counter-service/models"
 )
-
-type RateLimitConfig struct {
-	Domain        string `json:"domain"`
-	APIKey        string `json:"api_key"`
-	MaxConcurrent int    `json:"max_concurrent"`
-	Enabled       bool   `json:"enabled"`
-	Tier          string `json:"tier,omitempty"`
-	Description   string `json:"description,omitempty"`
-	UpdatedAt     int64  `json:"updated_at,omitempty"`
-}
 
 // SetConfig 创建或更新限流配置
 func (c *Client) SetConfig(ctx context.Context, cfg models.RateLimitConfig) error {
@@ -36,18 +27,26 @@ func (c *Client) SetConfig(ctx context.Context, cfg models.RateLimitConfig) erro
 		"updated_at":     time.Now().Unix(),
 	}
 
-	if cfg.Tier != "" {
-		fields["tier"] = cfg.Tier
-	}
 	if cfg.Description != "" {
 		fields["description"] = cfg.Description
 	}
 
-	return c.rdb.HSet(ctx, key, fields).Err()
+	_, err := c.rdb.TxPipelined(ctx, func(pipe goredis.Pipeliner) error {
+		pipe.HSet(ctx, key, fields)
+		if cfg.DescriptionSet && cfg.Description == "" {
+			pipe.HDel(ctx, key, "description")
+		}
+		return nil
+	})
+	return err
 }
 
 // GetConfig 获取单个配置
-func (c *Client) GetConfig(ctx context.Context, domain, apiKey string) (*models.RateLimitConfig, error) {
+func (c *Client) GetConfig(ctx context.Context, domain, apiKey string) (*models.ConfigView, error) {
+	domain = models.NormalizeDomain(domain)
+	if domain == "" {
+		return nil, models.ErrEmptyDomain
+	}
 	key := c.Key(fmt.Sprintf("config:%s:%s", domain, hashAPIKey(apiKey)))
 
 	result, err := c.rdb.HGetAll(ctx, key).Result()
@@ -58,32 +57,38 @@ func (c *Client) GetConfig(ctx context.Context, domain, apiKey string) (*models.
 		return nil, nil // 不存在返回 nil
 	}
 
-	maxConcurrent, _ := strconv.Atoi(result["max_concurrent"])
-	enabled := result["enabled"] == "true"
-	updatedAt, _ := strconv.ParseInt(result["updated_at"], 10, 64)
+	return configView(domain, hashAPIKey(apiKey), result)
+}
 
-	return &models.RateLimitConfig{
-		Domain:        domain,
-		APIKey:        apiKey,
-		APIKeyHash:    hashAPIKey(apiKey),
-		MaxConcurrent: maxConcurrent,
-		Enabled:       enabled,
-		Tier:          result["tier"],
-		Description:   result["description"],
-		UpdatedAt:     updatedAt,
+func configView(domain, hash string, fields map[string]string) (*models.ConfigView, error) {
+	if fields["enabled"] != "true" && fields["enabled"] != "false" {
+		return nil, fmt.Errorf("%w: enabled must be true or false", ErrInvalidConfig)
+	}
+	limit, err := strconv.Atoi(fields["max_concurrent"])
+	if err != nil || limit <= 0 || strconv.Itoa(limit) != fields["max_concurrent"] {
+		return nil, fmt.Errorf("%w: max_concurrent must be a positive integer", ErrInvalidConfig)
+	}
+	updatedAt, _ := strconv.ParseInt(fields["updated_at"], 10, 64)
+	return &models.ConfigView{
+		Domain: domain, APIKeyHash: hash, MaxConcurrent: limit,
+		Enabled: fields["enabled"] == "true", Description: fields["description"], UpdatedAt: updatedAt,
 	}, nil
 }
 
 // DeleteConfig 删除指定配置
 func (c *Client) DeleteConfig(ctx context.Context, domain, apiKey string) error {
+	domain = models.NormalizeDomain(domain)
+	if domain == "" {
+		return models.ErrEmptyDomain
+	}
 	key := c.Key(fmt.Sprintf("config:%s:%s", domain, hashAPIKey(apiKey)))
 	return c.rdb.Del(ctx, key).Err()
 }
 
 // ListConfigs 批量查询配置（使用 Lua 脚本分页）
 type ConfigListResult struct {
-	Cursor  string                   `json:"cursor"`
-	Configs []models.RateLimitConfig `json:"configs"`
+	Cursor  string              `json:"cursor"`
+	Configs []models.ConfigView `json:"configs"`
 }
 
 func (c *Client) ListConfigs(ctx context.Context, pattern string, cursor uint64, count int64) (*ConfigListResult, error) {
@@ -116,28 +121,20 @@ func (c *Client) ListConfigs(ctx context.Context, pattern string, cursor uint64,
 			return nil, err
 		}
 	}
-	configs := make([]models.RateLimitConfig, 0, len(page))
+	configs := make([]models.ConfigView, 0, len(page))
 	for _, item := range page {
 		key := item["key"]
 		// 解析 key 为 domain:api_key_hash
-		parts := strings.SplitN(strings.TrimPrefix(key, c.prefix+"config:"), ":", 2)
-		if len(parts) != 2 {
-			continue // 跳过非法 key
+		identity := strings.TrimPrefix(key, c.prefix+"config:")
+		separator := strings.LastIndexByte(identity, ':')
+		if separator <= 0 {
+			return nil, fmt.Errorf("%w: malformed config key", ErrInvalidConfig)
 		}
-
-		maxConcurrent, _ := strconv.Atoi(item["max_concurrent"])
-		enabled := item["enabled"] == "true"
-		updatedAt, _ := strconv.ParseInt(item["updated_at"], 10, 64)
-
-		configs = append(configs, models.RateLimitConfig{
-			Domain:        parts[0],
-			APIKeyHash:    parts[1],
-			MaxConcurrent: maxConcurrent,
-			Enabled:       enabled,
-			Tier:          item["tier"],
-			Description:   item["description"],
-			UpdatedAt:     updatedAt,
-		})
+		view, err := configView(identity[:separator], identity[separator+1:], item)
+		if err != nil {
+			return nil, err
+		}
+		configs = append(configs, *view)
 	}
 
 	return &ConfigListResult{

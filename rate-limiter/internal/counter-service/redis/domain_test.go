@@ -3,6 +3,7 @@ package redis_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -18,7 +19,6 @@ func TestDomainRuleSharesQuota(t *testing.T) {
 			s, client := setupTestRedis(t)
 			ctx := context.Background()
 			require.NoError(t, client.SetConfig(ctx, models.RateLimitConfig{Domain: pattern, MaxConcurrent: 2, Enabled: true}))
-			require.NoError(t, client.SetConfig(ctx, models.RateLimitConfig{Domain: "api.example.com", APIKey: "known", MaxConcurrent: 100, Enabled: true}))
 			acquire := func(domain, key string) (*redis.AcquireResult, error) {
 				return client.Acquire(ctx, models.AcquireRequest{Domain: domain, APIKey: key, TTLMS: 30000})
 			}
@@ -53,41 +53,79 @@ func TestDomainRuleSharesQuota(t *testing.T) {
 	}
 }
 
-func TestDomainRulePrecedenceAndRejections(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		patterns []string
-		limit    int
-		enabled  bool
-		invalid  bool
-		wantErr  error
-	}{
-		{"exact first", []string{"api.example.com", "*.example.com", "*"}, 1, true, false, nil},
-		{"parent before global and exact key", []string{"*.example.com", "*"}, 2, true, false, nil},
-		{"global before exact key", []string{"*"}, 3, true, false, nil},
-		{"disabled exact stops fallback", []string{"api.example.com", "*.example.com", "*"}, 1, false, false, redis.ErrAPIKeyDisabled},
-		{"invalid parent stops fallback", []string{"*.example.com", "*"}, 2, true, true, redis.ErrInvalidConfig},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s, client := setupTestRedis(t)
-			ctx := context.Background()
-			for i, domain := range tc.patterns {
-				require.NoError(t, client.SetConfig(ctx, models.RateLimitConfig{Domain: domain, MaxConcurrent: tc.limit + i, Enabled: i > 0 || tc.enabled}))
+func TestRulePrecedenceAndDisabledFallback(t *testing.T) {
+	patterns := []string{"api.example.com", "*.example.com", "*", "api.example.com", "*.example.com", "*"}
+	for _, higher := range []string{"absent", "disabled"} {
+		for winner := 0; winner <= 6; winner++ {
+			t.Run(fmt.Sprintf("%s/winner-%d", higher, winner), func(t *testing.T) {
+				s, client := setupTestRedis(t)
+				ctx := context.Background()
+				for i, pattern := range patterns {
+					if i < winner && higher == "absent" {
+						continue
+					}
+					key := ""
+					if i < 3 {
+						key = "known"
+					}
+					require.NoError(t, client.SetConfig(ctx, models.RateLimitConfig{Domain: pattern, APIKey: key, MaxConcurrent: i + 1, Enabled: i >= winner}))
+				}
+				req := models.AcquireRequest{Domain: "api.example.com", APIKey: "known", TTLMS: 30000}
+				result, err := client.Acquire(ctx, req)
+				require.NoError(t, err)
+				require.True(t, result.Allowed)
+				if winner == 6 {
+					require.Empty(t, result.LeaseID)
+					expected := 0
+					if higher == "disabled" {
+						expected = 6
+					}
+					require.Len(t, s.Keys(), expected)
+					return
+				}
+				require.Equal(t, winner+1, result.MaxConcurrent)
+				selectedKey := ""
+				if winner < 3 {
+					selectedKey = "known"
+				}
+				pointer, err := s.Get("rl:lease:" + result.LeaseID)
+				require.NoError(t, err)
+				require.Equal(t, "rl:leases:api.example.com:"+sha256Hex(selectedKey), pointer)
+				for i := 1; i < winner+1; i++ {
+					_, err = client.Acquire(ctx, req)
+					require.NoError(t, err)
+				}
+				_, err = client.Acquire(ctx, req)
+				require.ErrorIs(t, err, redis.ErrLimitExceeded, "must not fall through a full active policy")
+			})
+		}
+	}
+}
+
+func TestCorruptCandidateStopsFallback(t *testing.T) {
+	for _, field := range []string{"enabled", "max_concurrent"} {
+		for _, value := range []string{"<missing>", "garbage", "0", "1.5", "TRUE"} {
+			for _, key := range []string{"known", ""} {
+				t.Run(field+"/"+value+"/"+key, func(t *testing.T) {
+					s, client := setupTestRedis(t)
+					ctx := context.Background()
+					cfg := models.RateLimitConfig{Domain: "api.example.com", APIKey: key, MaxConcurrent: 1, Enabled: true}
+					require.NoError(t, client.SetConfig(ctx, cfg))
+					require.NoError(t, client.SetConfig(ctx, models.RateLimitConfig{Domain: "*", MaxConcurrent: 100, Enabled: true}))
+					configKey := "rl:config:api.example.com:" + sha256Hex(key)
+					if value == "<missing>" {
+						s.HDel(configKey, field)
+					} else {
+						s.HSet(configKey, field, value)
+					}
+					_, err := client.Acquire(ctx, models.AcquireRequest{Domain: cfg.Domain, APIKey: "known", TTLMS: 30000})
+					require.ErrorIs(t, err, redis.ErrInvalidConfig)
+					for _, stored := range s.Keys() {
+						require.NotContains(t, stored, "rl:lease")
+					}
+				})
 			}
-			if tc.invalid {
-				s.HSet("rl:config:"+tc.patterns[0]+":"+sha256Hex(""), "max_concurrent", "bad")
-			}
-			require.NoError(t, client.SetConfig(ctx, models.RateLimitConfig{Domain: "api.example.com", APIKey: "known", MaxConcurrent: 100, Enabled: true}))
-			res, err := client.Acquire(ctx, models.AcquireRequest{Domain: "api.example.com", APIKey: "known", TTLMS: 30000})
-			if tc.wantErr != nil {
-				require.ErrorIs(t, err, tc.wantErr)
-				require.False(t, res.Allowed)
-				require.False(t, s.Exists("rl:leases:api.example.com:"+sha256Hex("")))
-				return
-			}
-			require.NoError(t, err)
-			require.Equal(t, tc.limit, res.MaxConcurrent)
-		})
+		}
 	}
 }
 
@@ -141,6 +179,7 @@ func TestDomainLeaseRenewalAndRuleSwitch(t *testing.T) {
 	legacy, err := client.Acquire(ctx, req)
 	require.NoError(t, err)
 	require.NoError(t, client.SetConfig(ctx, models.RateLimitConfig{Domain: "api.example.com", MaxConcurrent: 1, Enabled: true}))
+	require.NoError(t, client.SetConfig(ctx, models.RateLimitConfig{Domain: req.Domain, APIKey: req.APIKey, MaxConcurrent: 1, Enabled: false}))
 	domainLease, err := client.Acquire(ctx, req)
 	require.NoError(t, err)
 	for i := 0; i < 6; i++ {
@@ -160,6 +199,7 @@ func TestDomainLeaseRenewalAndRuleSwitch(t *testing.T) {
 	_, err = client.Acquire(ctx, req)
 	require.NoError(t, err, "expired domain lease must restore capacity")
 	require.NoError(t, client.DeleteConfig(ctx, req.Domain, ""))
+	require.NoError(t, client.SetConfig(ctx, models.RateLimitConfig{Domain: req.Domain, APIKey: req.APIKey, MaxConcurrent: 1, Enabled: true}))
 	fallback, err := client.Acquire(ctx, req)
 	require.NoError(t, err, "deleting domain rule must restore existing key rule")
 	pointer, err := s.Get("rl:lease:" + fallback.LeaseID)

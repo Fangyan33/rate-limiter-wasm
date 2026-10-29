@@ -22,9 +22,12 @@ domains:
 # rate_limits 配置项已废弃（分布式模式下）
 # 所有限流配置通过 Counter Service API 管理，存储在 Redis:
 #   - 配置键格式: rl:config:{domain}:{sha256(api_key)}
-#   - 优先查空 key 规则（精确 > *.parent > *），不存在时再按同样顺序查具体 key
-#   - 命中规则被禁用或超限时拒绝，不回退；通配符下各实际域名独立计数
-#   - 配置字段: max_concurrent, enabled, tier
+#   - 先查具体 key（精确 > *.parent > *），再查空 key 的域名规则（同样顺序）
+#   - 禁用逐条跳过，无规则放行；启用规则超限才拒绝，不回退
+#   - enabled 缺失/非法或启用阈值损坏返回内部 500，网关 fail-open
+#   - 计数按实际域名 + key 隔离，域名规则单独共享；域名统一小写
+#   - 配置字段: max_concurrent, enabled（必填布尔值）, description（省略保留、空串清空）
+#   - 写请求如含 api_key_hash，必须等于 SHA256(api_key)，否则 400；查询不返回 api_key
 #
 # 如需使用本地限流模式，请设置 distributed_limit.enabled: false
 # 并取消注释以下 rate_limits 配置：
@@ -39,7 +42,7 @@ domains:
 # rate_limits:
 #   - api_key: ""
 #     max_concurrent: 10
-# 空 key 规则优先于同一配置内所有具体 key 规则。
+# 具体 key 优先；没有匹配规则则放行，空 rate_limits 也合法。
 
 distributed_limit:
   enabled: true

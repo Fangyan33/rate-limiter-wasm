@@ -2,15 +2,14 @@ package redis
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"rate-limiter-wasm/rate-limiter/internal/counter-service/models"
 )
 
 var (
@@ -111,8 +110,7 @@ func (c *Client) Key(subKey string) string {
 }
 
 func hashAPIKey(apiKey string) string {
-	sum := sha256.Sum256([]byte(apiKey))
-	return hex.EncodeToString(sum[:])
+	return models.HashAPIKey(apiKey)
 }
 
 // Rdb 暴露底层 redis.Client（供 Lua 脚本、HSET 等直接使用）

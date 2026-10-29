@@ -51,7 +51,7 @@ spec:
                       uri: http://counter-service.default.svc.cluster.local:8080/wasm/rate-limiter.wasm
                       cluster: counter-service
                       timeout: 10s
-                    sha256: 8a5c3a571ac10ca2ac470fc20c2c0333c93bc7f0794e1bc128b0ae1983171fd2
+                    sha256: 9c1b6ec2f32ae5fe4d77b618fd8d20d11d8f509e372a3853122bdabc527bfd39
               configuration:
                 "@type": type.googleapis.com/google.protobuf.StringValue
                 value: |

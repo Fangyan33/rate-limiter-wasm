@@ -9,5 +9,13 @@
 - 覆盖全链路：Wasm 下载、校验、加载、初始化、运行，Counter Service、Redis、acquire/renew/release、异步回调、usage 注入、解析和指标写入。
 - 保留加载保障：两个插件使用 ECDS 独立加载及透传默认配置，同时设置 `fail_open: true` 和 `vm_config.nack_on_code_cache_miss: true`；业务配置错误应记录日志并禁用功能，不得阻止代理启动或监听器就绪。
 - 保留执行保障：外部调用必须有超时，暂停请求必须有独立超时恢复并忽略迟到的拒绝；续约、释放和统计异常不得影响业务流，统计不得暂停转发或无限缓冲。
-- 区分有效策略与故障：仅 `HTTP 200 + allowed=false` 且原因为 `limit_exceeded`、`api_key_disabled` 或 `config_not_found` 时，按配置拒绝（默认 429）；内部错误、未知原因、缺字段或非法响应一律放行。业务上游自身错误原样透传。
+- 区分有效策略与故障：仅 `HTTP 200 + allowed=false` 且原因为 `limit_exceeded` 时，按配置拒绝（默认 429）；内部错误、未知原因、缺字段或非法响应一律放行。业务上游自身错误原样透传。
 - 相关改动必须验证故障放行和正常策略拒绝；加载及运行时改动须通过真实 Istio 故障注入验证，明确区分本地验证与生产验收。
+
+## 当前规则与废弃功能
+
+具体 API Key 规则优先于空 key 的域名规则，禁用规则跳过，无匹配规则直接放行。`token-stats` 已废弃，仅保留现有代码、构建和部署清单，不再新增功能或修复统计问题，后续将完整移除。
+
+## Istio E2E 环境
+
+Istio E2E 使用本地 Kubernetes 集群，当前为 `kind-kind`。复用已有 Istio 控制面，在独立命名空间运行测试网关与依赖；所有 kubectl 操作显式指定本地 context，结束后清理测试资源。

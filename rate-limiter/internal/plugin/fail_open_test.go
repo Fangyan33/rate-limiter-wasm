@@ -13,7 +13,7 @@ import (
 )
 
 func TestInvalidPluginConfigurationStartsInBypassMode(t *testing.T) {
-	for _, cfg := range []string{"", "{", "domains: []", "domains: [api.example.com]\nrate_limits: []"} {
+	for _, cfg := range []string{"", "{", "domains: []"} {
 		t.Run(cfg, func(t *testing.T) {
 			host, reset := proxytest.NewHostEmulator(proxytest.NewEmulatorOption().
 				WithVMContext(NewVMContext()).WithPluginConfiguration([]byte(cfg)))
@@ -36,10 +36,10 @@ func TestInvalidConfigurationDisablesPreviousRules(t *testing.T) {
 }
 
 func TestAcquireOnlyRejectsExplicitPolicyDecisions(t *testing.T) {
-	for _, body := range []string{"", "{", "{}", "null", `{"allowed":null}`, `{"allowed":"false"}`,
+	for _, body := range []string{`{"allowed":true}`, "", "{", "{}", "null", `{"allowed":null}`, `{"allowed":"false"}`,
 		`{"error":"backend failed"}`, `{"allowed":false}`, `{"allowed":false,"reason":"internal_error"}`,
 		`{"allowed":false,"reason":"invalid_config"}`, `{"allowed":false,"reason":"redis_unavailable"}`,
-		`{"allowed":false,"reason":"unknown"}`, strings.Repeat("x", 64*1024+1)} {
+		`{"allowed":false,"reason":"unknown"}`, `{"allowed":false,"reason":"api_key_disabled"}`, `{"allowed":false,"reason":"config_not_found"}`, strings.Repeat("x", 64*1024+1)} {
 		t.Run(body[:min(len(body), 80)], func(t *testing.T) {
 			root, host, _ := newRenewalHost(t, nil)
 			id := beginRenewalRequest(t, host)
@@ -51,7 +51,7 @@ func TestAcquireOnlyRejectsExplicitPolicyDecisions(t *testing.T) {
 			require.Empty(t, root.activeLeases)
 		})
 	}
-	for _, reason := range []string{"limit_exceeded", "api_key_disabled", "config_not_found"} {
+	for _, reason := range []string{"limit_exceeded"} {
 		t.Run(reason, func(t *testing.T) {
 			_, host, _ := newRenewalHost(t, nil)
 			id := beginRenewalRequest(t, host)

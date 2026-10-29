@@ -358,7 +358,7 @@ func (h *httpContext) onAcquireResponse(numHeaders, bodySize, numTrailers int) {
 
 	if !*resp.Allowed {
 		switch resp.Reason {
-		case "limit_exceeded", "config_not_found", "api_key_disabled":
+		case "limit_exceeded":
 		default:
 			proxywasm.LogWarnf("invalid acquire denial: reason=%s; failing open", resp.Reason)
 			h.resumeAfterFailedOpen()
@@ -376,8 +376,6 @@ func (h *httpContext) onAcquireResponse(numHeaders, bodySize, numTrailers int) {
 	h.distributedLeaseID = resp.LeaseID
 	if resp.LeaseID != "" {
 		h.root.trackLease(resp.LeaseID, h.counterService, h.acquireStartedAt)
-	} else {
-		proxywasm.LogWarn("acquire succeeded without lease_id; failing open without renewal")
 	}
 	h.resumeAfterFailedOpen()
 }

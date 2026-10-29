@@ -6,7 +6,7 @@ import (
 )
 
 func TestDomainLimitSharesQuotaAndIsolatesDomains(t *testing.T) {
-	l := NewLocalLimiter(map[string]int{"": 2, "known": 100})
+	l := NewLocalLimiter(map[string]int{"": 2})
 	first, ok := l.AcquireForDomain("a.example.com", "")
 	if !ok {
 		t.Fatal("empty key should acquire domain slot")
@@ -38,20 +38,37 @@ func TestDomainLimitSharesQuotaAndIsolatesDomains(t *testing.T) {
 	third()
 }
 
-func TestDomainAcquirePreservesLegacyKeyLimits(t *testing.T) {
-	l := NewLocalLimiter(map[string]int{"known": 1})
-	for _, key := range []string{"", "unknown"} {
-		if _, ok := l.AcquireForDomain("a.example.com", key); ok {
-			t.Fatalf("unexpected admission for %q", key)
-		}
-	}
-	release, ok := l.AcquireForDomain("a.example.com", "known")
+func TestSpecificKeyPriorityAndDomainIsolation(t *testing.T) {
+	l := NewLocalLimiter(map[string]int{"known": 1, "": 1})
+	keyRelease, ok := l.AcquireForDomain("a.example.com", "known")
 	if !ok {
-		t.Fatal("known key should acquire")
+		t.Fatal("key rule should acquire")
 	}
-	defer release()
-	if _, ok := l.AcquireForDomain("b.example.com", "known"); ok {
-		t.Fatal("legacy key limit must remain shared across domains")
+	if _, ok = l.AcquireForDomain("a.example.com", "known"); ok {
+		t.Fatal("full key rule must not fall back to domain")
+	}
+	domainRelease, ok := l.AcquireForDomain("a.example.com", "unknown")
+	if !ok {
+		t.Fatal("key pool must not consume domain quota")
+	}
+	otherRelease, ok := l.AcquireForDomain("b.example.com", "known")
+	if !ok {
+		t.Fatal("same key must have independent per-domain capacity")
+	}
+	keyRelease()
+	if _, ok = l.AcquireForDomain("a.example.com", ""); ok {
+		t.Fatal("key release must not free domain capacity")
+	}
+	domainRelease()
+	otherRelease()
+	if len(l.domainInFlight) != 0 {
+		t.Fatal("released counters must be removed")
+	}
+	for _, key := range []string{"", "unknown"} {
+		release, allowed := NewLocalLimiter(map[string]int{"known": 1}).AcquireForDomain("a.example.com", key)
+		if !allowed || release != nil {
+			t.Fatalf("unmatched key must be unlimited: %q", key)
+		}
 	}
 }
 

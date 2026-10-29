@@ -67,7 +67,7 @@ func TestPluginBypassesUnmatchedDomain(t *testing.T) {
 	}
 }
 
-func TestPluginRejectsMissingAuthorizationHeader(t *testing.T) {
+func TestPluginAllowsMissingAuthorizationWithoutDomainRule(t *testing.T) {
 	host, reset := newHTTPHost(t)
 	defer reset()
 
@@ -75,10 +75,12 @@ func TestPluginRejectsMissingAuthorizationHeader(t *testing.T) {
 	action := host.CallOnRequestHeaders(contextID, [][2]string{
 		{":authority", "api.example.com"},
 	}, false)
-	assertRejected(t, host, contextID, action, 429, "Rate limit exceeded")
+	if action != types.ActionContinue || host.GetSentLocalResponse(contextID) != nil {
+		t.Fatal("no rule must pass through")
+	}
 }
 
-func TestPluginRejectsUnknownAPIKeyWithoutDefaultFallback(t *testing.T) {
+func TestPluginAllowsUnknownAPIKeyWithoutDomainRule(t *testing.T) {
 	host, reset := newHTTPHost(t)
 	defer reset()
 
@@ -87,7 +89,9 @@ func TestPluginRejectsUnknownAPIKeyWithoutDefaultFallback(t *testing.T) {
 		{":authority", "api.example.com"},
 		{"authorization", "Bearer unknown_key"},
 	}, false)
-	assertRejected(t, host, unknownID, unknownAction, 429, "Rate limit exceeded")
+	if unknownAction != types.ActionContinue || host.GetSentLocalResponse(unknownID) != nil {
+		t.Fatal("unknown key must pass through without a domain rule")
+	}
 
 	allowedID := host.InitializeHttpContext()
 	allowedAction := host.CallOnRequestHeaders(allowedID, [][2]string{
@@ -95,7 +99,7 @@ func TestPluginRejectsUnknownAPIKeyWithoutDefaultFallback(t *testing.T) {
 		{"authorization", "Bearer key_basic_001"},
 	}, false)
 	if allowedAction != types.ActionContinue {
-		t.Fatalf("expected configured api key to continue after unknown key rejection, got %v", allowedAction)
+		t.Fatalf("expected configured api key to continue after unknown key bypass, got %v", allowedAction)
 	}
 }
 

@@ -1,5 +1,20 @@
 # Counter-Service ZSET 租约集合迁移 Implementation Plan
 
+> 状态：历史记录，已由[当前限流契约](../../specs/rate-limiting-contract.md)替代。
+>
+> 迁移已经完成，当前还有/renew。原计划的明文测试夹具、旧模块路径和计数模型不应直接复制；现行结构与测试以契约和源码为准。
+
+## 当前行为修正
+
+- 具体 key 的精确、直接父域、全局规则优先，再按相同顺序匹配空 key 的域名规则；enabled=false 逐条跳过，最终无规则直接放行。
+- 只有命中启用规则后超限才拒绝；dispatch、Redis 或配置损坏均 fail-open，不转本地降级。损坏候选不回退。
+- Redis 配置键为 domain + SHA256(api_key)，并发占用为实际域名 + 选中key摘要的 ZSET；空 key 也有固定摘要。
+- 配置写入必须有布尔 enabled；如携带 api_key_hash 必须与原始key一致。查询对象没有 api_key，tier已删除，description省略保留、空串清空，域名统一小写。
+- token-stats 已废弃；当前限流验收使用 --rate-limiter-only，不依赖统计或旧指标提取配置。
+
+<details>
+<summary>原始历史设计与实施片段（已替代，不可作为当前指令执行）</summary>
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 将 counter-service 的分布式并发占用模型从旧的 `counter + lease pointer` 迁移到 ZSET 租约集合模型，结构性修复 lease TTL 过期后槽位泄漏导致持续 429 的问题。
@@ -604,3 +619,5 @@ Expected: 成功生成 `dist/rate-limiter.wasm`，无编译错误。
 4. `rl:counter:<domain>:<api_key>` 不再被写入
 5. `bash ./build.sh` 成功
 6. 插件 `/acquire` 与 `/release` 接口契约无变化
+
+</details>

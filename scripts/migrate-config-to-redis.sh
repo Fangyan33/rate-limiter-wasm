@@ -82,21 +82,15 @@ fi
 # 解析并导入每个配置
 count=0
 yq eval '.rate_limits[] | @json' "$CONFIG_FILE" | while read -r line; do
-  api_key=$(echo "$line" | jq -r '.api_key // ""')
-  max_concurrent=$(echo "$line" | jq -r '.max_concurrent')
-  tier=$(echo "$line" | jq -r '.tier // "standard"')
+  payload=$(jq -cn --arg domain "$DEFAULT_DOMAIN" --argjson rule "$line" '
+    $rule | {domain: $domain, api_key: (.api_key // ""),
+             max_concurrent: .max_concurrent, enabled: true}
+    + (if has("description") then {description: .description} else {} end)')
 
-  echo "导入配置: domain=$DEFAULT_DOMAIN, api_key=$api_key, max_concurrent=$max_concurrent, tier=$tier"
-
+  echo "导入配置: domain=$DEFAULT_DOMAIN"
   response=$(curl -s -w "\n%{http_code}" -X PUT "$COUNTER_SERVICE_URL/config" \
     -H "Content-Type: application/json" \
-    -d "{
-      \"domain\": \"$DEFAULT_DOMAIN\",
-      \"api_key\": \"$api_key\",
-      \"max_concurrent\": $max_concurrent,
-      \"enabled\": true,
-      \"tier\": \"$tier\"
-    }")
+    -d "$payload")
 
   http_code=$(echo "$response" | tail -n1)
   body=$(echo "$response" | head -n-1)

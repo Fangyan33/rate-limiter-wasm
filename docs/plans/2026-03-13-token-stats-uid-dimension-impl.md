@@ -1,5 +1,12 @@
 # LLM Token 统计（domain, uid）实现计划
 
+> 状态：历史记录，已由[当前限流契约](../specs/rate-limiting-contract.md)替代。
+>
+> token-stats 已废弃并停止维护，后续完整移除。本文只保留当时的设计背景，不再作为实施计划或当前推荐部署；旧指标提取方式不再作为活动方案，UID精度和基数问题不在本次修复范围。
+
+<details>
+<summary>原始历史设计与实施片段（已替代，不可作为当前指令执行）</summary>
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** 在现有 rate-limiter Proxy-WASM 插件中新增 LLM Token 用量统计：Prometheus Counter 指标按 `{domain, uid}` 维度输出，并在 `(domain, uid)` 组合数超过上限时归入 `uid="__other__"`。
@@ -27,8 +34,8 @@
 ## Task 1: 扩展配置模型与默认值（TokenStatistics）
 
 **Files:**
-- Modify: [internal/config/config.go](internal/config/config.go)
-- Modify: [internal/config/config_test.go](internal/config/config_test.go)
+- Modify: [internal/config/config.go](../../token-stats/internal/config/config.go)
+- Modify: [internal/config/config_test.go](../../token-stats/internal/config/config_test.go)
 
 ### Step 1: Write the failing test
 
@@ -108,8 +115,8 @@ Expected: PASS
 ## Task 2: JWT uid 解析函数（失败禁用统计）
 
 **Files:**
-- Modify: [internal/plugin/root.go](internal/plugin/root.go)
-- Modify: [internal/plugin/root_test.go](internal/plugin/root_test.go)
+- Modify: [internal/plugin/root.go](../../token-stats/internal/plugin/root.go)
+- Modify: [internal/plugin/root_test.go](../../token-stats/internal/plugin/root_test.go)
 
 ### Step 1: Write the failing tests
 
@@ -148,8 +155,8 @@ Expected: PASS
 ## Task 3: 指标缓存 + 基数限制（domain|uid）
 
 **Files:**
-- Modify: [internal/plugin/root.go](internal/plugin/root.go)
-- Modify: [internal/plugin/root_test.go](internal/plugin/root_test.go)
+- Modify: [internal/plugin/root.go](../../token-stats/internal/plugin/root.go)
+- Modify: [internal/plugin/root_test.go](../../token-stats/internal/plugin/root_test.go)
 
 ### Step 1: Write failing tests for metrics
 
@@ -197,8 +204,8 @@ Expected: FAIL（尚未定义/增量 metric）。
 ## Task 4: usage 解析 + 流式注入（最小实现）
 
 **Files:**
-- Modify: [internal/plugin/root.go](internal/plugin/root.go)
-- Modify: [internal/plugin/root_test.go](internal/plugin/root_test.go)
+- Modify: [internal/plugin/root.go](../../token-stats/internal/plugin/root.go)
+- Modify: [internal/plugin/root_test.go](../../token-stats/internal/plugin/root_test.go)
 
 ### Step 1: Write failing tests
 
@@ -226,7 +233,7 @@ Expected: FAIL
 ## Task 5: StreamDone 更新指标 + 日志脱敏
 
 **Files:**
-- Modify: [internal/plugin/root.go](internal/plugin/root.go)
+- Modify: [internal/plugin/root.go](../../token-stats/internal/plugin/root.go)
 
 ### Step 1: Write failing test
 
@@ -243,8 +250,8 @@ Expected: FAIL
 ## Task 6: 更新部署示例 YAML
 
 **Files:**
-- Modify: [deploy/istio/rate-limiter-plugin-config.yaml](deploy/istio/rate-limiter-plugin-config.yaml)
-- Modify: [deploy/istio/rate-limiter-envoyfilter.yaml](deploy/istio/rate-limiter-envoyfilter.yaml)
+- Modify: [deploy/istio/rate-limiter-plugin-config.yaml](../../deploy/istio/rate-limiter-plugin-config.yaml)
+- Modify: [deploy/istio/rate-limiter-envoyfilter.yaml](../../deploy/istio/rate-limiter-envoyfilter.yaml)
 
 ### Step 1: Update plugin config example
 
@@ -284,3 +291,5 @@ Run:
 Expected:
 - 全绿
 - 新增测试覆盖 token_statistics config、JWT uid 解析、usage 解析、metric_key_limit 超限归并。
+
+</details>

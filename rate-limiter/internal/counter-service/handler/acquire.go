@@ -53,12 +53,6 @@ func (h *AcquireHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, redis.ErrRedisUnavailable):
 			status = http.StatusServiceUnavailable
 			reason = "redis_unavailable"
-		case errors.Is(err, redis.ErrConfigNotFound):
-			status = http.StatusOK
-			reason = "config_not_found"
-		case errors.Is(err, redis.ErrAPIKeyDisabled):
-			status = http.StatusOK
-			reason = "api_key_disabled"
 		case errors.Is(err, redis.ErrLimitExceeded):
 			status = http.StatusOK
 			reason = "limit_exceeded"

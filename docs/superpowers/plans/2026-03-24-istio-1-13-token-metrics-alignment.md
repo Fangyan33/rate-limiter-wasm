@@ -1,10 +1,17 @@
 # Istio 1.13 token metrics alignment Implementation Plan
 
+> 状态：历史记录，已由[当前限流契约](../../specs/rate-limiting-contract.md)替代。
+>
+> token-stats 已废弃并停止维护，后续完整移除。本文只保留当时的设计背景，不再作为实施计划或当前推荐部署；旧指标提取方式不再作为活动方案，UID精度和基数问题不在本次修复范围。
+
+<details>
+<summary>原始历史设计与实施片段（已替代，不可作为当前指令执行）</summary>
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Align the repository with the verified Istio 1.13.5 token-metrics design by keeping the new plugin metric-name format, updating tests, removing the obsolete EnvoyFilter BOOTSTRAP stats_tags patch, and adding maintained deployment guidance for `extraStatTags`.
 
-**Architecture:** The plugin continues emitting internal stat names in the `llm.<metric>.;domain=.=<domain>;.;uid=.=<uid>;.;` shape. Istio 1.13.5 extracts `domain` and `uid` through mesh config `defaultConfig.extraStatTags`, so repository deployment examples must stop advertising custom EnvoyFilter BOOTSTRAP regex and instead document the mesh-config dependency explicitly. Tests and deployment artifacts must all reflect the same architecture.
+**Architecture:** The plugin continues emitting internal stat names in the `llm.<metric>domain=.=<domain>;.;uid=.=<uid>;.;` shape. Istio 1.13.5 extracts `domain` and `uid` through mesh config `defaultConfig.extraStatTags`, so repository deployment examples must stop advertising custom EnvoyFilter BOOTSTRAP regex and instead document the mesh-config dependency explicitly. Tests and deployment artifacts must all reflect the same architecture.
 
 **Tech Stack:** Go 1.22, Proxy-WASM Go SDK, Istio EnvoyFilter YAML, Kubernetes ConfigMap YAML, Go package tests
 
@@ -15,7 +22,7 @@
 - Modify: `internal/plugin/token_stats_test.go`
   - Update all metric-name assertions from the abandoned `__host0domain__ / __user0id__` format to the verified Istio 1.13-compatible delimiter format.
 - Modify if focused verification proves drift: `internal/plugin/root.go`
-  - Ensure `buildMetricName` emits `llm.<metric>.;domain=.=<domain>;.;uid=.=<uid>;.;` only if the focused test shows it is still wrong.
+  - Ensure `buildMetricName` emits `llm.<metric>domain=.=<domain>;.;uid=.=<uid>;.;` only if the focused test shows it is still wrong.
 - Modify: `deploy/istio/rate-limiter-envoyfilter.yaml`
   - Remove the obsolete `applyTo: BOOTSTRAP` custom `stats_config.stats_tags` patch.
 - Modify if residue is found: `deploy/istio/prometheus-servicemonitor.yaml`
@@ -463,3 +470,5 @@ Only if verification required a final small edit. Otherwise skip this step.
 - Do not change `normalizeHost` or `sanitizeMetricValue` semantics as part of this alignment work unless a focused failing test proves they are incompatible with the approved Istio 1.13 design.
 - Do not touch unrelated distributed-limiter or counter-service logic.
 - Do not commit `dist/rate-limiter.wasm` as part of this alignment work unless the user explicitly requests a rebuilt artifact.
+
+</details>

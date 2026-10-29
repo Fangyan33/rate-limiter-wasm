@@ -1,5 +1,12 @@
 # LLM token metrics stats_tags redesign
 
+> 状态：历史记录，已由[当前限流契约](../../specs/rate-limiting-contract.md)替代。
+>
+> token-stats 已废弃并停止维护，后续完整移除。本文只保留当时的设计背景，不再作为实施计划或当前推荐部署；旧指标提取方式不再作为活动方案，UID精度和基数问题不在本次修复范围。
+
+<details>
+<summary>原始历史设计与实施片段（已替代，不可作为当前指令执行）</summary>
+
 ## Summary
 
 This design updates LLM token metrics to an Istio 1.13-compatible stats tag extraction model. The WASM plugin encodes `domain` and `uid` into the internal Envoy stat name using the delimiter pattern that Istio 1.13 already knows how to extract through `extraStatTags`, instead of relying on custom `stats_config.stats_tags` regex in an `EnvoyFilter` BOOTSTRAP patch.
@@ -331,3 +338,5 @@ For Istio 1.13 deployments, verification should be done in this order:
 - `docs/superpowers/specs/2026-03-20-llm-token-metrics-stats-tags-design.md`
 
 If any one of these still reflects the abandoned `__host0domain__ / __user0id__ + custom regex` design, the repository becomes internally inconsistent.
+
+</details>

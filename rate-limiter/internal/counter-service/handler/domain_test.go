@@ -25,14 +25,13 @@ func TestDomainConfigAndLeaseHTTPFlow(t *testing.T) {
 			configs := NewConfigHandler(acquire.redisClient)
 			put := domainRequest(configs, http.MethodPut, "/config", `{"domain":"api.example.com",`+keyField+`"max_concurrent":1,"enabled":true}`)
 			require.Equal(t, http.StatusOK, put.Code, put.Body.String())
-			// A concrete key config must not bypass the domain rule.
-			setTestConfig(t, acquire.redisClient, "api.example.com", "known", 100, true)
+			// A disabled key falls back to the domain rule.
+			setTestConfig(t, acquire.redisClient, "api.example.com", "known", 100, false)
 			for _, query := range []string{"", "&api_key="} {
 				get := domainRequest(configs, http.MethodGet, "/config?domain=api.example.com"+query, "")
 				require.Equal(t, http.StatusOK, get.Code)
-				var cfg models.RateLimitConfig
+				var cfg models.ConfigView
 				require.NoError(t, json.Unmarshal(get.Body.Bytes(), &cfg))
-				require.Empty(t, cfg.APIKey)
 				require.Equal(t, 1, cfg.MaxConcurrent)
 				require.Equal(t, strings.TrimPrefix(testConfigKey(cfg.Domain, ""), "rl:config:"+cfg.Domain+":"), cfg.APIKeyHash)
 			}
@@ -44,7 +43,6 @@ func TestDomainConfigAndLeaseHTTPFlow(t *testing.T) {
 				var page redis.ConfigListResult
 				require.NoError(t, json.Unmarshal(list.Body.Bytes(), &page))
 				for _, cfg := range page.Configs {
-					require.Empty(t, cfg.APIKey)
 					if "rl:config:"+cfg.Domain+":"+cfg.APIKeyHash == testConfigKey("api.example.com", "") {
 						found = true
 					}
@@ -83,8 +81,8 @@ func TestDomainConfigAndLeaseHTTPFlow(t *testing.T) {
 			missing := domainRequest(acquire, http.MethodPost, "/acquire", `{"domain":"api.example.com","ttl_ms":30000}`)
 			require.Equal(t, http.StatusOK, missing.Code)
 			require.NoError(t, json.Unmarshal(missing.Body.Bytes(), &denied))
-			require.False(t, denied.Allowed)
-			require.Equal(t, "config_not_found", denied.Reason)
+			require.True(t, denied.Allowed)
+			require.JSONEq(t, `{"allowed":true}`, missing.Body.String())
 			known := domainRequest(configs, http.MethodGet, "/config?domain=api.example.com&api_key=known", "")
 			require.Equal(t, http.StatusOK, known.Code, "deleting domain rule must preserve key rule")
 		})
@@ -95,7 +93,7 @@ func TestDomainConfigHTTPValidation(t *testing.T) {
 	acquire, _, _ := setupTestHandler(t)
 	configs := NewConfigHandler(acquire.redisClient)
 	for _, method := range []string{http.MethodPut, http.MethodGet, http.MethodDelete} {
-		res := domainRequest(configs, method, "/config", `{"max_concurrent":1}`)
+		res := domainRequest(configs, method, "/config", `{"max_concurrent":1,"enabled":true}`)
 		require.Equal(t, http.StatusBadRequest, res.Code)
 		require.Contains(t, res.Body.String(), "domain")
 	}

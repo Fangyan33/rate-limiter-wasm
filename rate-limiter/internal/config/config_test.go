@@ -255,3 +255,15 @@ rate_limits:
 		t.Fatal("expected default error_response.message to be populated")
 	}
 }
+
+func TestEmptyLocalRulesAreUnlimited(t *testing.T) {
+	for _, data := range []string{"domains: [api.example.com]", "domains: [api.example.com]\nrate_limits: []"} {
+		cfg, err := config.Parse([]byte(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cfg.RateLimits) != 0 {
+			t.Fatalf("unexpected rules: %+v", cfg.RateLimits)
+		}
+	}
+}

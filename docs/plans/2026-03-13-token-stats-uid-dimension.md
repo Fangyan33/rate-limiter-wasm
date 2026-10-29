@@ -1,5 +1,12 @@
 # LLM Token 用量统计功能 - uid 维度设计方案
 
+> 状态：历史记录，已由[当前限流契约](../specs/rate-limiting-contract.md)替代。
+>
+> token-stats 已废弃并停止维护，后续完整移除。本文只保留当时的设计背景，不再作为实施计划或当前推荐部署；旧指标提取方式不再作为活动方案，UID精度和基数问题不在本次修复范围。
+
+<details>
+<summary>原始历史设计与实施片段（已替代，不可作为当前指令执行）</summary>
+
 ## 1. 设计目标
 
 在现有 Token 统计功能基础上，将 Prometheus 指标维度从 `{domain, api_key, model}` 调整为 `{domain, uid}`：
@@ -559,7 +566,7 @@ func maskUID(uid string) string {
 
 ## 11. 与现有设计的差异
 
-与 [token-statistics-implementation.md](token-statistics-implementation.md) 的主要差异：
+与 [token-statistics-implementation.md](2026-03-13-token-stats-uid-dimension-impl.md) 的主要差异：
 
 | 维度 | 现有设计 | 本设计 |
 |------|---------|--------|
@@ -596,3 +603,5 @@ func maskUID(uid string) string {
 5. **安全边界**：不暴露 api_key，uid 在日志中脱敏，依赖上游 JWT 验签保证身份可信
 
 核心改动集中在 `internal/plugin/root.go`（JWT 解析 + 指标更新）和 `internal/config/config.go`（配置扩展），不影响现有的限流逻辑。实现分为 6 个文件改动，每个步骤都有明确的代码示例和测试用例，确保功能的正确性和稳定性。
+
+</details>

@@ -1,5 +1,20 @@
 # WASM 插件拆分 Spec
 
+> 状态：历史记录，已由[当前限流契约](rate-limiting-contract.md)替代。
+>
+> 双插件拆分已经完成。rate-limiter是当前维护模块；token-stats已废弃。现存Token下载Cluster由限流EnvoyFilter创建，职责独立不代表基础设施无依赖。
+
+## 当前行为修正
+
+- 具体 key 的精确、直接父域、全局规则优先，再按相同顺序匹配空 key 的域名规则；enabled=false 逐条跳过，最终无规则直接放行。
+- 只有命中启用规则后超限才拒绝；dispatch、Redis 或配置损坏均 fail-open，不转本地降级。损坏候选不回退。
+- Redis 配置键为 domain + SHA256(api_key)，并发占用为实际域名 + 选中key摘要的 ZSET；空 key 也有固定摘要。
+- 配置写入必须有布尔 enabled；如携带 api_key_hash 必须与原始key一致。查询对象没有 api_key，tier已删除，description省略保留、空串清空，域名统一小写。
+- token-stats 已废弃；当前限流验收使用 --rate-limiter-only，不依赖统计或旧指标提取配置。
+
+<details>
+<summary>原始历史设计与实施片段（已替代，不可作为当前指令执行）</summary>
+
 ## 1. 摘要
 
 当前仓库把“按实际并发数限流”和“LLM token usage stats”实现为同一个 Proxy-WASM 插件。该设计将现有单插件拆分为两个独立部署、独立配置、独立构建的 WASM 插件：
@@ -476,3 +491,5 @@ token_statistics:
 ---
 
 本 spec 为拆分方案的基线文档。后续实现必须以本 spec 中确认的模块边界和目录结构为准。
+
+</details>

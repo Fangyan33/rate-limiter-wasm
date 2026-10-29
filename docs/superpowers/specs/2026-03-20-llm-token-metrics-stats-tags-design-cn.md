@@ -1,4 +1,12 @@
 # LLM token 指标 stats_tags 重设计
+
+> 状态：历史记录，已由[当前限流契约](../../specs/rate-limiting-contract.md)替代。
+>
+> token-stats 已废弃并停止维护，后续完整移除。本文只保留当时的设计背景，不再作为实施计划或当前推荐部署；旧指标提取方式不再作为活动方案，UID精度和基数问题不在本次修复范围。
+
+<details>
+<summary>原始历史设计与实施片段（已替代，不可作为当前指令执行）</summary>
+
 ## 摘要
 本设计将 LLM token 指标更新为兼容 Istio 1.13 的 stats 标签提取模型。WASM 插件使用 Istio 1.13 已知如何通过 `extraStatTags` 提取的分隔符模式，将 `domain` 和 `uid` 编码到内部 Envoy 统计名称中，而不是依赖于 `EnvoyFilter` BOOTSTRAP 补丁中的自定义 `stats_config.stats_tags` 正则表达式。
 目标保持不变：
@@ -220,3 +228,5 @@ llm_stream_parse_errors_total{domain="llm-svc.domain", uid="sfe-platform"}
 - 定义 `defaultConfig.extraStatTags: [domain, uid]` 的 Istio mesh config 示例或部署说明
 - `docs/superpowers/specs/2026-03-20-llm-token-metrics-stats-tags-design.md`
 如果其中任何一项仍反映已放弃的 `__host0domain__ / __user0id__ + 自定义正则` 设计，则仓库将变得内部不一致。
+
+</details>

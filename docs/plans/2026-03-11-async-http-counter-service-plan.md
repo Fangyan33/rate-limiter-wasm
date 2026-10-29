@@ -1,5 +1,20 @@
 # Async HTTP Counter Service Integration Implementation Plan
 
+> 状态：历史记录，已由[当前限流契约](../specs/rate-limiting-contract.md)替代。
+>
+> 异步 callout 已落地；dispatch 失败和回调异常都放行，不执行原计划中的本地降级。原实施清单仅记录演进过程。
+
+## 当前行为修正
+
+- 具体 key 的精确、直接父域、全局规则优先，再按相同顺序匹配空 key 的域名规则；enabled=false 逐条跳过，最终无规则直接放行。
+- 只有命中启用规则后超限才拒绝；dispatch、Redis 或配置损坏均 fail-open，不转本地降级。损坏候选不回退。
+- Redis 配置键为 domain + SHA256(api_key)，并发占用为实际域名 + 选中key摘要的 ZSET；空 key 也有固定摘要。
+- 配置写入必须有布尔 enabled；如携带 api_key_hash 必须与原始key一致。查询对象没有 api_key，tier已删除，description省略保留、空串清空，域名统一小写。
+- token-stats 已废弃；当前限流验收使用 --rate-limiter-only，不依赖统计或旧指标提取配置。
+
+<details>
+<summary>原始历史设计与实施片段（已替代，不可作为当前指令执行）</summary>
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Replace the current synchronous placeholder distributed store path with a real Proxy-WASM-compatible asynchronous HTTP counter-service flow.
@@ -400,3 +415,5 @@ Expected: PASS
 git add docs/plans/2026-03-10-http-counter-service-design.md
 git commit -m "docs: clarify async counter service request flow"
 ```
+
+</details>

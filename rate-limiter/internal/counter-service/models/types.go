@@ -1,9 +1,16 @@
 package models
 
+import "strings"
+
+// NormalizeDomain is shared by configuration CRUD and acquire lookups.
+func NormalizeDomain(domain string) string {
+	return strings.ToLower(strings.TrimSpace(domain))
+}
+
 // AcquireRequest 获取并发槽位的请求。
 type AcquireRequest struct {
 	Domain string `json:"domain"`  // 实际请求域名，用于配置查找和计数。
-	APIKey string `json:"api_key"` // 空值只匹配域名规则；域名规则始终优先。
+	APIKey string `json:"api_key"` // 先匹配具体 key，再回退空 key 的域名规则。
 	TTLMS  int64  `json:"ttl_ms"`
 }
 
@@ -11,11 +18,10 @@ type AcquireRequest struct {
 type AcquireResult struct {
 	Allowed       bool   `json:"allowed"`
 	LeaseID       string `json:"lease_id,omitempty"`
-	Reason        string `json:"reason,omitempty"` // 拒绝原因：limit_exceeded, config_not_found, api_key_disabled
+	Reason        string `json:"reason,omitempty"` // 仅 limit_exceeded 表示策略拒绝。
 	Message       string `json:"message,omitempty"`
 	MaxConcurrent int    `json:"max_concurrent,omitempty"`
 	CurrentCount  int    `json:"current_count,omitempty"`
-	Tier          string `json:"tier,omitempty"` // 客户等级：basic, premium, enterprise
 }
 
 // ReleaseRequest 释放并发槽位的请求
@@ -54,20 +60,29 @@ type RenewResult struct {
 	Message string `json:"message,omitempty"`
 }
 
-// RateLimitConfig 限流配置（用于配置管理 API）
+// RateLimitConfig is an internal write model, never a query response.
 type RateLimitConfig struct {
+	Domain         string
+	APIKey         string // Empty selects a domain rule; never persisted in Redis.
+	MaxConcurrent  int
+	Enabled        bool
+	Description    string
+	DescriptionSet bool // An explicit empty description clears the stored value.
+}
+
+// ConfigView deliberately has no plaintext API key field.
+type ConfigView struct {
 	Domain        string `json:"domain"`
-	APIKey        string `json:"api_key"` // 空值表示该域名的总并发规则。
-	APIKeyHash    string `json:"api_key_hash,omitempty"`
+	APIKeyHash    string `json:"api_key_hash"`
 	MaxConcurrent int    `json:"max_concurrent"`
 	Enabled       bool   `json:"enabled"`
-	Tier          string `json:"tier,omitempty"`
 	Description   string `json:"description,omitempty"`
 	UpdatedAt     int64  `json:"updated_at,omitempty"`
 }
 
 // Validate 验证 AcquireRequest
 func (r *AcquireRequest) Validate() error {
+	r.Domain = NormalizeDomain(r.Domain)
 	if r.Domain == "" {
 		return ErrEmptyDomain
 	}
@@ -87,6 +102,7 @@ func (r *ReleaseRequest) Validate() error {
 
 // Validate 验证 RateLimitConfig
 func (c *RateLimitConfig) Validate() error {
+	c.Domain = NormalizeDomain(c.Domain)
 	if c.Domain == "" {
 		return ErrEmptyDomain
 	}

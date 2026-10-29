@@ -3,14 +3,14 @@
 本仓库包含两个运行在 Istio / Envoy 网关侧的 WASM 插件：
 
 - `rate-limiter`：负责并发限流，支持通过 Counter Service + Redis 实现分布式限流
-- `token-stats`：负责 LLM token usage 统计与 stream usage 注入，不参与限流
+- `token-stats`：已废弃，停止维护；暂时保留代码、构建和部署清单，后续将完整移除
 
 构建产物由 `bash ./build.sh` 统一生成：
 
 - `dist/rate-limiter.wasm`
 - `dist/token-stats.wasm`
 
-以下构建命令从仓库根目录执行。历史需求记录已归档到 [docs/specs/PRD.md](docs/specs/PRD.md)，其中未完成或已替代的设计不代表当前能力。
+以下构建命令从源码仓库根目录执行。接口与匹配规则见[当前限流契约](docs/specs/rate-limiting-contract.md)。历史需求记录已归档到 [docs/specs/PRD.md](docs/specs/PRD.md)，其中未完成或已替代的设计不代表当前能力。
 
 ## 统一构建与制品打包
 
@@ -37,6 +37,7 @@ make artifacts IMAGE_REPOSITORY=registry.example.com/gateway/counter-service ARC
 - `counter-service-image.tar`：可用 `docker load` 导入的镜像，镜像名为 `<IMAGE_REPOSITORY>:<版本>`，仓库名默认为 `counter-service`。
 - `deploy/istio/`：部署清单副本，其中 Counter Service 镜像版本、两个 EnvoyFilter 的 SHA256 已按本次构建更新。
 - `VERSION`、`README.md`、`SHA256SUMS`：版本、使用说明及目录内文件的校验和。
+- `docs/`、`scripts/migrate-config-to-redis.sh`：随包提供当前契约、说明和配置导入脚本，避免 README 引用缺失。
 
 同时生成 `dist/rate-limiter-wasm-<版本>-linux-<架构>.tar.gz` 及对应的 `.sha256` 文件。解压后可执行：
 
@@ -56,7 +57,7 @@ docker load -i counter-service-image.tar
 - `deploy/istio/counter-service-deployment.yaml` - Counter Service 部署配置，用于分布式限流
 - `deploy/istio/redis.yaml` - Redis 部署配置，用于存储分布式限流配置和租约状态
 
-### `token-stats` 相关
+### `token-stats` 相关（已废弃）
 
 - `deploy/istio/token-stats-envoyfilter.yaml` - Istio EnvoyFilter 配置，用于加载和配置 `token-stats` WASM 插件
 - `deploy/istio/token-stats-plugin-config.yaml` - `token-stats` 插件配置示例
@@ -112,21 +113,36 @@ error_response:
 
 **配置字段：**
 
-- `max_concurrent`: 最大并发数
-- `enabled`: 是否启用（true/false）
-- `tier`: 可选，用户层级标识（如 basic, premium, enterprise）
+- `max_concurrent`：最大并发数，必须是正整数。
+- `enabled`：写入时必须显式提供布尔值；false 表示跳过该条规则。
+- `description`：可选描述；省略时保留旧值，非空字符串覆盖，显式空字符串清空。
+- `updated_at`：服务端写入的更新时间。
 
-`api_key` 为空字符串或省略时表示域名规则，使用 `sha256("")` 存储。域名规则下，同一实际域名的所有请求共享并发额度，包括无 Authorization、格式错误的 Authorization 和携带任意 API Key 的请求。
+域名在配置 CRUD 和 acquire 中统一去掉首尾空格并转为小写。API Key 保持原始字节，不做大小写或空格规范化。`tier` 已删除，写请求包含该字段返回 400；Redis 不保存明文 `api_key`。
+
+`api_key` 为空字符串或省略时表示域名规则，使用 `sha256("")` 存储，其固定摘要为：
+
+```text
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+```
+
+空 key 有 hash 是正常行为。先写具体 key、再写空 key 会保留两条独立配置；空 key 不会覆盖或删除原有规则。
 
 **规则匹配优先级：**
 
-先查空 key 的域名规则，顺序为精确域名 → 父域名通配 → 全局通配；只有这三类规则全部不存在时，才按以下顺序查找请求中的具体 API Key：
+1. 精确域名 + 请求 API Key。
+2. 直接父域通配 + 请求 API Key。
+3. 全局通配 `*` + 请求 API Key。
+4. 精确域名的空 key 规则。
+5. 直接父域通配的空 key 规则。
+6. 全局通配的空 key 规则。
+7. 没有启用的匹配规则时直接放行，不创建租约或计数。
 
-1. 精确匹配：`rl:config:api.example.com:<sha256(key001)>`
-2. 父域名通配：`rl:config:*.example.com:<sha256(key001)>`
-3. 全局通配：`rl:config:*:<sha256(key001)>`
+没有有效 Bearer key 时直接从域名规则开始。禁用规则逐条跳过，继续查同类通配规则，再回退域名规则。因此禁用具体 key 后，仍可能受通配 key 或域名规则约束；全部候选都不存在或被禁用时放行。命中启用规则后若并发已满，按 `error_response` 拒绝，不再回退。
 
-域名通配规则也优先于精确域名的具体 key 规则。命中规则若被禁用或并发已满，直接拒绝，不再回退；禁用规则仍沿用 `api_key_disabled` 拒绝原因。阈值无效属于配置故障，Counter Service 返回 500，网关放行，不回退到其他规则。通配符只查当前父域（例如 `a.b.example.com` 查 `*.b.example.com`）和全局 `*`，计数按实际请求域名隔离，不同子域名不会共享额度。插件的 `domains` 仍决定哪些请求进入限流。
+Redis 候选配置的 `enabled` 缺失或不是精确的 `true`/`false`，或启用规则的阈值不是正整数，属于配置故障：Counter Service 返回 `500 + reason=invalid_config`，网关 fail-open，不继续回退。配置查询遇到损坏记录也返回 500，不将非法启用状态显示为 false；列表遇到损坏记录时整页报错。
+
+通配符只查直接父域（例如 `a.b.example.com` 查 `*.b.example.com`）和全局 `*`。具体 key 额度按实际域名 + key 隔离；回退域名规则的请求按实际域名共享额度，不同时占用两个池。插件的 `domains` 仍决定哪些请求进入限流。
 
 #### 仅按域名限流
 
@@ -142,7 +158,7 @@ curl "http://counter-service:8080/config?domain=api.example.com"
 curl -X DELETE "http://counter-service:8080/config?domain=api.example.com&api_key="
 ```
 
-配置生效后，带不同 key 的请求和不带 key 的请求合计最多同时运行 10 个；流式请求在结束前持续占用额度。没有匹配的域名规则时，仍须匹配有效 Bearer 中的具体 key 配置，否则拒绝。
+未命中启用的具体 key 规则时，带不同未知 key、无 Authorization 或格式错误 Authorization 的请求合计最多同时运行 10 个；流式请求在结束前持续占用额度。具体 key 规则使用自己的额度，超限时不借用域名额度。没有任何启用的匹配规则时放行。
 
 本地静态模式使用如下配置：
 
@@ -157,9 +173,9 @@ distributed_limit:
   enabled: false
 ```
 
-两个域名各自拥有 10 个并发槽位。每份本地配置只能包含一条空 key 规则，该规则优先于同一配置中的具体 key 规则。本地额度仅在当前插件实例内生效；未配置空 key 时，原有按 key 的计数行为不变。不将非空 key 自动去空格后当作域名规则。
+两个域名各自拥有 10 个域名槽位。每份本地配置最多一条空 key 规则，具体 key 优先。具体 key 的额度也按实际域名 + key 独立计数。本地额度仅在当前插件实例内生效；没有匹配规则时放行，空 `rate_limits` 合法。非空 key 不会自动去空格后变成域名规则。
 
-升级时先发布 Counter Service，再发布 WASM 插件，最后创建空 key 规则。无需迁移已有 Redis 数据；规则切换仅影响后续 acquire，已有租约仍在原集合中续约和释放，不追溯合并。因此切换期间已有请求不会自动计入新的域名额度。删除域名规则后，后续请求恢复使用具体 key 规则。
+部署时先发布 Counter Service，再发布 WASM 插件及匹配的 SHA256。项目尚未上线，不提供旧数据迁移。运行中的规则变更只影响后续 acquire，已有租约继续在原集合中续约、释放，不追溯合并。
 
 #### 配置管理 API
 
@@ -174,10 +190,13 @@ curl -X PUT http://counter-service:8080/config \
     "domain": "llm-demo.local",
     "api_key": "key_basic_001",
     "max_concurrent": 2,
-    "enabled": true,
-    "tier": "basic"
+    "enabled": true
   }'
 ```
+
+写请求中的 `api_key_hash` 可选；只要携带，就必须严格等于 `SHA256(api_key)` 的小写十六进制摘要。空值、null、类型错误或不匹配均返回 400，且不修改 Redis。`enabled` 缺失、null 或非布尔类型也返回 400。可选 `api_key`、`api_key_hash`、`description` 出现时不接受 null。
+
+例如，列表中的具体 key 记录不含明文 key，直接 PUT 会因 hash 与默认空 key 不一致而返回 400。域名规则的 hash 等于空字符串摘要，省略 api_key 仍可通过校验。
 
 **查询单个配置：**
 
@@ -185,7 +204,7 @@ curl -X PUT http://counter-service:8080/config \
 curl "http://counter-service:8080/config?domain=llm-demo.local&api_key=key_basic_001"
 ```
 
-返回结果会包含请求中的明文 `api_key`，以及对应的 `api_key_hash`。
+单项查询和列表响应都只包含 `api_key_hash`，JSON 中没有 `api_key` 字段。单项查询/删除仍通过 `api_key` 参数定位。编辑具体 key 规则时必须提供原始 key，不能把查询对象直接 PUT 回去。
 
 **分页查询配置：**
 
@@ -193,7 +212,7 @@ curl "http://counter-service:8080/config?domain=llm-demo.local&api_key=key_basic
 curl "http://counter-service:8080/configs?cursor=0&limit=100"
 ```
 
-`/configs` 返回 `cursor` 和当前页的 `configs`。将返回的 `cursor` 作为下一次请求的参数，直到返回 `"0"` 才表示本轮遍历结束；一页不足以代表全部配置。空页返回 `configs: []`，仍需根据 `cursor` 判断是否继续。列表不会返回明文 `api_key`，只返回 `api_key_hash`。
+`/configs` 返回 `cursor` 和当前页的 `configs`。将返回的 `cursor` 作为下一次请求的参数，直到返回 `"0"` 才表示本轮遍历结束；一页不足以代表全部配置。空页返回 `configs: []`，仍需根据 `cursor` 判断是否继续。列表 JSON 不包含 `api_key` 字段，只返回 `api_key_hash`。不支持按 domain 参数筛选，需完整翻页后自行筛选。
 
 **删除配置：**
 
@@ -226,8 +245,7 @@ Content-Type: application/json
   "allowed": true,
   "lease_id": "lease-uuid-123",
   "max_concurrent": 2,
-  "current_count": 1,
-  "tier": "basic"
+  "current_count": 1
 }
 ```
 
@@ -246,18 +264,16 @@ Content-Type: application/json
 }
 ```
 
-**Acquire 响应（拒绝 - 配置未找到）：**
+**Acquire 响应（无匹配规则）：**
 
 ```http
 HTTP/1.1 200 OK
 Content-Type: application/json
 
-{
-  "allowed": false,
-  "reason": "config_not_found",
-  "message": "config not found"
-}
+{"allowed":true}
 ```
+
+这是正常放行，不含 lease_id，不创建租约，不执行续约或释放。禁用所有匹配规则后也返回该结果。
 
 **Acquire 响应（拒绝 - Redis 不可用）：**
 
@@ -401,10 +417,8 @@ kubectl exec <counter-service-pod> -n default -- wget -qO- http://localhost:8080
 rate_limits:
   - api_key: key_basic_001
     max_concurrent: 2
-    tier: basic
   - api_key: key_premium_001
     max_concurrent: 5
-    tier: premium
 ```
 
 也可以取消默认文件中的 `rate_limits` 注释并填写实际配置；分布式模式仍通过 Counter Service 读取 Redis 中的阈值。下面用独立文件导入与随附 EnvoyFilter 一致的域名：
@@ -435,8 +449,7 @@ curl -X PUT http://<counter-service-ip>:8080/config \
     "domain": "llm-demo.local",
     "api_key": "key_basic_001",
     "max_concurrent": 2,
-    "enabled": true,
-    "tier": "basic"
+    "enabled": true
   }'
 
 # 高级用户配置
@@ -446,8 +459,7 @@ curl -X PUT http://<counter-service-ip>:8080/config \
     "domain": "llm-demo.local",
     "api_key": "key_premium_001",
     "max_concurrent": 5,
-    "enabled": true,
-    "tier": "premium"
+    "enabled": true
   }'
 
 # 通配符域名配置（作为 fallback）
@@ -457,8 +469,7 @@ curl -X PUT http://<counter-service-ip>:8080/config \
     "domain": "*.example.com",
     "api_key": "key_basic_001",
     "max_concurrent": 3,
-    "enabled": true,
-    "tier": "basic"
+    "enabled": true
   }'
 ```
 
@@ -476,8 +487,8 @@ curl "http://<counter-service-ip>:8080/config?domain=llm-demo.local&api_key=key_
 
 注意：
 
-- `/config` 单项查询返回 `api_key` 和 `api_key_hash`
-- `/configs` 列表只返回 `api_key_hash`，不会回显明文 `api_key`
+- `/config` 单项查询仅返回 `api_key_hash`，没有 `api_key` 字段
+- `/configs` 列表仅返回 `api_key_hash`，没有 `api_key` 字段
 
 #### 步骤 4：更新 WASM 模块 SHA256
 
@@ -527,8 +538,7 @@ curl -X PUT http://<counter-service-ip>:8080/config \
     "domain": "llm-demo.local",
     "api_key": "key_basic_001",
     "max_concurrent": 10,
-    "enabled": true,
-    "tier": "basic"
+    "enabled": true
   }'
 ```
 
@@ -548,7 +558,7 @@ curl -X PUT http://<counter-service-ip>:8080/config \
   }'
 ```
 
-禁用后，`POST /acquire` 会返回 `HTTP 200 + allowed=false + reason=api_key_disabled`；网关侧请求会按插件 `error_response` 被拒绝（默认 429）。
+禁用后跳过该具体 key 规则，继续查同 key 的通配规则，再匹配域名规则；没有启用规则则直接放行。禁用不等于禁止该 key 访问业务。
 
 #### 删除配置
 
@@ -583,15 +593,13 @@ done
     "domain": "llm-demo.local",
     "api_key": "key001",
     "max_concurrent": 5,
-    "enabled": true,
-    "tier": "premium"
+    "enabled": true
   },
   {
     "domain": "*.example.com",
     "api_key": "key002",
     "max_concurrent": 2,
-    "enabled": true,
-    "tier": "basic"
+    "enabled": true
   }
 ]
 ```
@@ -614,7 +622,7 @@ done
 
 两个 ECDS 扩展同时设置 `vm_config.nack_on_code_cache_miss: true`。Istio Agent 无法下载模块时，可能把原始远程配置交给 Envoy；此时必须拒绝未缓存的扩展并保留透传默认配置，不能向请求发布尚未初始化的 Wasm 工厂。这个设置与 ECDS 隔离配合使用，不能直接套到原来内联在监听器中的 Wasm 配置上。
 
-只有 `HTTP 200 + allowed=false` 且原因是 `limit_exceeded`、`api_key_disabled` 或 `config_not_found` 的明确策略拒绝，才按 `error_response` 拒绝请求。缺少或格式错误的 Bearer 凭证也走相同故障放行路径；服务正常时仍须匹配限流规则。非法配置、内部错误或不完整响应不能冒充有效策略拒绝。
+只有 `HTTP 200 + allowed=false + reason=limit_exceeded` 的明确超限结果，才按 `error_response` 拒绝请求。缺少或格式错误的 Bearer 凭证会尝试域名规则，无规则正常放行；非法配置、内部错误或不完整响应均 fail-open，不能冒充有效策略拒绝。
 
 acquire 的等待时间采用 `timeout_ms`，未设置或超过 5000ms 时使用 5000ms；暂停期间的看门狗周期最多 100ms，恢复仍取决于 Envoy 事件循环正常运行。该机制覆盖插件链路故障；代理进程退出、宿主机故障或业务上游不可用，需要由网关高可用和业务重试处理。EnvoyFilter 自身的 YAML/Protobuf 错误也必须在发布前检查，不能靠插件代码兜底。
 
@@ -704,7 +712,9 @@ acquire 的等待时间采用 `timeout_ms`，未设置或超过 5000ms 时使用
    istioctl proxy-config cluster <gateway-pod> -n ai-gateway-ns | grep counter-service
    ```
 
-## token-stats
+## token-stats（已废弃）
+
+该功能停止维护，后续将完整移除。本次仅保留现有代码、构建和部署清单，不修复 UID 精度、指标基数或解析问题。以下内容为冻结的既有功能说明，不属于当前推荐部署或限流验收要求。
 
 `token-stats` 只负责 usage 统计与 `stream_options.include_usage` 注入，不参与限流、Redis 配置管理或 Counter Service 配置管理。
 
@@ -787,7 +797,7 @@ llm_stream_parse_errors_total{domain="llm-svc.domain", uid="sfe-platform"}
 
 对于 Istio 1.13.5，只有部署 `deploy/istio/token-stats-envoyfilter.yaml` 还不足以让 Prometheus 中的 token metrics 自动带上 `domain` 和 `uid` labels。这个版本需要在 mesh config 中通过 `defaultConfig.extraStatTags` 显式声明这两个 tag，Envoy 才会把插件输出的统计维度作为原生 label 暴露出来。
 
-当前推荐做法如下：
+已废弃功能的既有配置方式如下：
 
 1. 部署 `token-stats` 的 EnvoyFilter，使插件产生对应统计维度。
 2. 同时在 Istio mesh config 中声明 `defaultConfig.extraStatTags: [domain, uid]`。

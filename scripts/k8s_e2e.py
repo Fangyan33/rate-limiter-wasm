@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""在现有 Kubernetes/Istio 中运行隔离的真实 WASM E2E；只使用 Python 标准库。"""
+"""在本地 Kubernetes/Istio 中运行隔离的真实 WASM E2E；只使用 Python 标准库。"""
 
 import argparse
 import base64
@@ -171,7 +171,7 @@ class Suite:
             "gateways": ["e2e"], "http": [{"route": [{"destination": {
                 "host": f"fixture.{ns}.svc.cluster.local", "port": {"number": 8080}}}],
                 "timeout": "20s"}]})
-        for plugin in ("rate-limiter", "token-stats"):
+        for plugin in (("rate-limiter",) if self.args.rate_limiter_only else ("rate-limiter", "token-stats")):
             digest = hashlib.sha256((Path(self.args.artifacts) / (plugin + ".wasm")).read_bytes()).hexdigest()
             config = "domains:\n  - '*.e2e.test'\n"
             if plugin == "rate-limiter":
@@ -244,6 +244,9 @@ class Suite:
         return ports
 
     def setup(self):
+        self.api_server = self.k("config", "view", "--minify", "-o",
+                                 "jsonpath={.clusters[0].cluster.server}").strip()
+        print(f"E2E 本地集群：{self.args.context} ({self.api_server})", flush=True)
         self.baseline = self.inventory()
         self.save("cluster-before.json", self.baseline)
         self.k("create", "-f", "-", data={"apiVersion": "v1", "kind": "Namespace",
@@ -266,14 +269,29 @@ class Suite:
         self.pods = sorted(p["metadata"]["name"] for p in pods)
         check(len(self.pods) == 2, "需要两个就绪的网关副本")
         self.gw = [self.forward("pod/" + p, 8080, 15090, 15000) for p in self.pods]
-        self.save("environment.json", {"context": self.args.context, "namespace": self.ns,
+        self.save("environment.json", {"context": self.args.context, "api_server": self.api_server,
+            "namespace": self.ns,
             "image": self.args.image, "pods": self.pods, "ttl_ms": 1500,
-            "metric_key_limit": 8, "git": subprocess.check_output(
+            "rate_limiter_only": self.args.rate_limiter_only, "git": subprocess.check_output(
                 ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()})
         eventually(lambda: self.gateway(host="unmatched.test")["status"] == 200, 40)
         # ECDS starts with a pass-through default. Confirm rate limiting is active
         # before testing policy behavior, rather than mistaking fallback for success.
-        eventually(lambda: self.gateway(key=self.key)["status"] == 429, 60)
+        self.assert_limiter_active()
+
+    def assert_limiter_active(self):
+        # A real occupied lease distinguishes an active limiter from the ECDS Lua default.
+        self.config(self.host, self.key, 1)
+        lease = None
+        try:
+            acquired = self.acquire(self.host, self.key, ttl=120000)
+            check(acquired["status"] == 200 and acquired["body"].get("lease_id"), acquired)
+            lease = acquired["body"]["lease_id"]
+            eventually(lambda: all(self.gateway(pod=i, key=self.key)["status"] == 429 for i in range(2)), 60)
+        finally:
+            if lease:
+                self.release(lease)
+            self.delete(self.host, self.key)
 
     def inventory(self):
         data = json.loads(self.k("get", "deployments,envoyfilters,configmaps", "-A", "-o", "json"))
@@ -343,7 +361,7 @@ class Suite:
             self.config("crud.e2e.test", "opaque", 2)
             result = self.api("/config?domain=crud.e2e.test&api_key=opaque")
             check(result["body"].get("api_key_hash") == hashlib.sha256(b"opaque").hexdigest(), result)
-            check(result["body"]["max_concurrent"] == 2, result)
+            check(result["body"]["max_concurrent"] == 2 and "api_key" not in result["body"], result)
             check(self.redis("EXISTS", "rl:config:crud.e2e.test:opaque") == "0", "Redis 含明文 key")
             self.config("crud.e2e.test", "opaque", 3)
             check(self.api("/config?domain=crud.e2e.test&api_key=opaque")["body"]["max_concurrent"] == 3, "更新失败")
@@ -364,7 +382,7 @@ class Suite:
                 check(response["status"] == 200, response)
                 result = response["body"]
                 for item in result["configs"]:
-                    check(item.get("api_key", "") == "", item)
+                    check("api_key" not in item and "tier" not in item, item)
                     seen.add(item["domain"])
                 cursor = result["cursor"]
                 if str(cursor) == "0":
@@ -403,14 +421,50 @@ class Suite:
             return "limit=1 时拒绝第2个 acquire；释放幂等，释放后恢复"
         self.run_case("CS-并发及释放幂等", slots)
 
-        def denials():
-            missing = self.acquire("missing.e2e.test", "missing")
-            check(missing["status"] == 200 and missing["body"]["reason"] == "config_not_found", missing)
-            self.config("disabled.e2e.test", "disabled", enabled=False)
-            disabled = self.acquire("disabled.e2e.test", "disabled")
-            check(disabled["status"] == 200 and disabled["body"]["reason"] == "api_key_disabled", disabled)
-            return "配置缺失、禁用均为 HTTP 200 + allowed=false"
-        self.run_case("CS-业务拒绝", denials)
+        def unmetered():
+            for domain, enabled in (("missing.e2e.test", None), ("disabled.e2e.test", False)):
+                if enabled is not None:
+                    self.config(domain, "disabled", enabled=enabled)
+                result = self.acquire(domain, "disabled")
+                check(result["status"] == 200 and result["body"] == {"allowed": True}, result)
+                check(self.leases(domain, "disabled") == 0, "无规则不能创建租约集合")
+            return "缺失或禁用规则均正常放行，无租约和计数"
+        self.run_case("CS-无启用规则放行", unmetered)
+
+        def write_contract():
+            domain, key = "write.e2e.test", "opaque"
+            payload = {"domain": domain.upper(), "api_key": key, "max_concurrent": 2,
+                       "enabled": True, "description": "initial", "api_key_hash": hashlib.sha256(key.encode()).hexdigest()}
+            check(self.api("/config", payload, "PUT")["status"] == 200, payload)
+            query = "/config?" + urlencode({"domain": domain.upper(), "api_key": key})
+            before = self.api(query)["body"]
+            check(before["domain"] == domain and "api_key" not in before and "tier" not in before, before)
+            for field, value in (("enabled", None), ("enabled", "true"), ("api_key_hash", ""),
+                                 ("api_key_hash", None), ("api_key_hash", "bad"), ("tier", "removed"),
+                                 ("description", None)):
+                invalid = {**payload, field: value}
+                result = self.api("/config", invalid, "PUT")
+                check(result["status"] == 400 and self.api(query)["body"] == before, result)
+            for suffix in (',"api_key_hash":"wrong","API_KEY_HASH":null}', ',"Tier":null}'):
+                raw = (json.dumps(payload)[:-1] + suffix).encode()
+                result = self.api("/config", raw, "PUT")
+                check(result["status"] == 400 and self.api(query)["body"] == before, result)
+            missing = dict(payload)
+            del missing["enabled"]
+            check(self.api("/config", missing, "PUT")["status"] == 400, "enabled 必须显式填写")
+            check(self.api("/config", before, "PUT")["status"] == 400, "查询对象不能被误写为域名规则")
+            del payload["description"]
+            check(self.api("/config", payload, "PUT")["status"] == 200, payload)
+            check(self.api(query)["body"].get("description") == "initial", "省略描述必须保留")
+            payload["description"] = ""
+            check(self.api("/config", payload, "PUT")["status"] == 200, payload)
+            check("description" not in self.api(query)["body"], "显式空串必须清空")
+            fields = self.redis("HKEYS", "rl:config:" + domain + ":" + payload["api_key_hash"]).splitlines()
+            check(not any(field in fields for field in ("tier", "api_key", "api_key_hash")), fields)
+            self.delete(domain.upper(), key)
+            check(self.api(query)["status"] == 404, "大小写域名删除未统一")
+            return "hash/布尔类型校验拒绝脏写；查询无明文；描述省略保留、空串删除；域名小写"
+        self.run_case("CS-写入契约与域名规范化", write_contract)
 
         def ttl_and_renew():
             domain = "ttl.e2e.test"
@@ -444,8 +498,24 @@ class Suite:
             result = self.acquire("outside.test", key)["body"]
             check(result.get("max_concurrent") == 3, result)
             self.release(result["lease_id"])
-            self.delete("*", key)
-            return "具体 key 规则：精确 > 当前父域通配 > 全局"
+            self.config("exact.wild.e2e.test", key, 1, enabled=False)
+            result = self.acquire("exact.wild.e2e.test", key)["body"]
+            check(result.get("max_concurrent") == 2, result)
+            self.release(result["lease_id"])
+            self.config("*.wild.e2e.test", key, 2, enabled=False)
+            result = self.acquire("exact.wild.e2e.test", key)["body"]
+            check(result.get("max_concurrent") == 3, result)
+            self.release(result["lease_id"])
+            self.config("*", key, 3, enabled=False)
+            self.config("exact.wild.e2e.test", "", 4)
+            result = self.acquire("exact.wild.e2e.test", key)["body"]
+            check(result.get("max_concurrent") == 4, result)
+            self.release(result["lease_id"])
+            for pattern, api_key in (("*", key), ("*.wild.e2e.test", key),
+                                     ("exact.wild.e2e.test", key), ("exact.wild.e2e.test", "")):
+                self.delete(pattern, api_key)
+            check(self.acquire("exact.wild.e2e.test", key)["body"] == {"allowed": True}, "最终无规则放行")
+            return "具体 key 精确 > 父域 > 全局；禁用逐级跳过，再回退域名，最终放行"
         self.run_case("CS-域名规则回退", fallback)
 
     def gateway_cases(self):
@@ -460,12 +530,11 @@ class Suite:
 
         for name, auth in (("缺少Authorization", None), ("非法Authorization", "Basic abc"),
                            ("未知key", "Bearer unknown")):
-            def reject(auth=auth):
+            def allow_unmatched(auth=auth):
                 response = self.gateway(authorization=auth)
-                check(response["status"] == 429 and response["raw"] == "Rate limit exceeded", response)
-                check("text/plain" in response["headers"].get("content-type", ""), response)
-                return "HTTP 429 + text/plain + 配置的拒绝消息"
-            self.run_case("GW-" + name, reject)
+                check(response["status"] == 200 and response["body"].get("id") == "e2e-upstream", response)
+                return "无匹配规则时正常到达上游"
+            self.run_case("GW-" + name, allow_unmatched)
 
         def allowed():
             response = self.gateway(key=self.key)
@@ -509,9 +578,9 @@ class Suite:
             check(future.result()["status"] == 200, "原请求异常")
             self.idle()
             self.delete(self.host, self.key)
-            check(self.gateway(key=self.key)["status"] == 429, "删除后未拒绝")
+            check(self.gateway(key=self.key)["status"] == 200, "删除后无规则应放行")
             self.config(self.host, self.key)
-            return "阈值 1→2 即时生效，删除 key 后立即拒绝"
+            return "阈值 1→2 即时生效，删除 key 后无规则放行"
         self.run_case("GW-配置热更新", hot_update)
 
         def domain_limit():
@@ -531,14 +600,51 @@ class Suite:
 
         def precedence():
             host = "one.precedence.e2e.test"
-            self.config(host, self.key, 3)
-            self.config("*.precedence.e2e.test", "", enabled=False)
-            check(self.gateway(host=host, key=self.key)["status"] == 429, "域名通配应优先于精确 key")
-            self.delete("*.precedence.e2e.test")
-            check(self.gateway(host=host, key=self.key)["status"] == 200, "移除域名规则未恢复 key 规则")
+            self.config(host, self.key, 1)
+            self.config("*.precedence.e2e.test", "", 1)
+            held = self.pool.submit(self.gateway, 0, host, self.key, {"stream": True, "hold_seconds": 2})
+            eventually(lambda: self.leases(host, self.key) == 1)
+            check(self.gateway(pod=1, host=host, key=self.key)["status"] == 429, "key 满额不能回退域名")
+            check(self.gateway(pod=1, host=host, key="unknown")["status"] == 200, "key 额度不应占用域名池")
+            check(held.result()["status"] == 200, "原 key 流异常")
             self.idle(host)
-            return "禁用的域名通配优先拒绝；移除后恢复精确 key"
-        self.run_case("GW-域名规则优先级", precedence)
+            self.config(host, self.key, 1, enabled=False)
+            held = self.pool.submit(self.gateway, 0, host, "unknown", {"stream": True, "hold_seconds": 2})
+            eventually(lambda: self.leases(host, "") == 1)
+            check(self.gateway(pod=1, host=host, key=self.key)["status"] == 429, "禁用 key 必须使用域名额度")
+            check(held.result()["status"] == 200, "域名流异常")
+            self.idle(host, "")
+            self.config("*.precedence.e2e.test", "", 1, enabled=False)
+            check(self.gateway(host=host, key=self.key)["status"] == 200, "全部规则禁用后应放行")
+            check(self.leases(host, self.key) == 0 and self.leases(host, "") == 0, "无规则不应创建租约")
+            self.delete("*.precedence.e2e.test")
+            self.delete(host, self.key)
+            return "key 优先且超限不回退；禁用后匹配域名；全部禁用则无租约放行"
+        self.run_case("GW-key优先与禁用回退", precedence)
+
+        def corrupt_config():
+            host, key = "corrupt.e2e.test", "corrupt"
+            redis_key = "rl:config:" + host + ":" + hashlib.sha256(key.encode()).hexdigest()
+            try:
+                self.config(host, "", 100)
+                for field in ("enabled", "max_concurrent"):
+                    for value in (None, "garbage", "TRUE", "0", "1.5"):
+                        self.config(host, key, 1)
+                        if value is None:
+                            self.redis("HDEL", redis_key, field)
+                        else:
+                            self.redis("HSET", redis_key, field, value)
+                        self.control(clear=True)
+                        response = self.gateway(host=host, key=key)
+                        check(response["status"] == 200 and response["body"].get("id") == "e2e-upstream", response)
+                        event = eventually(lambda: self.events("acquire", domain=host, api_key=key))[-1]
+                        check(event["status"] == 500 and json.loads(event["body"]).get("reason") == "invalid_config", event)
+                        check(self.leases(host, key) == 0 and self.leases(host, "") == 0, "损坏配置不得回退或计数")
+                return "10种 Redis 字段损坏返回内部500，两个计数池均为空，网关业务200"
+            finally:
+                self.delete(host, key)
+                self.delete(host)
+        self.run_case("GW-Redis配置损坏fail-open", corrupt_config)
 
         def domain_isolation():
             self.config("*.isolated.e2e.test", "")
@@ -634,7 +740,7 @@ class Suite:
 
     def failure_cases(self):
         for mode in ("503", "500", "invalid", "timeout", "empty", "null", "missing_allowed",
-                     "unknown_denial", "internal_error", "invalid_config", "oversize"):
+                     "unknown_denial", "internal_error", "invalid_config", "api_key_disabled", "config_not_found", "oversize"):
             def fault(mode=mode):
                 self.idle()
                 self.control(acquire=mode, clear=True)
@@ -656,7 +762,8 @@ class Suite:
                   {"status": response["status"], "length": len(response["raw"])})
             self.idle()
             return "2MiB JSON 原样转发，统计超限不暂停业务响应"
-        self.run_case("FAULT-统计体积超限放行", large_response)
+        if not self.args.rate_limiter_only:
+            self.run_case("FAULT-统计体积超限放行", large_response)
 
         for mode in ("503", "invalid", "timeout"):
             def release_fault(mode=mode):
@@ -901,9 +1008,7 @@ class Suite:
             self.run_case("FAULT-load-冷启动无下载源", cold_start)
         finally:
             self.k("apply", "-f", "-", data={"apiVersion": "v1", "kind": "List", "items": original})
-            # A valid disabled rule proves the original rate limiter is active again.
-            self.config(self.host, self.key, 1, enabled=False)
-            eventually(lambda: all(self.gateway(pod=i, key=self.key)["status"] == 429 for i in range(2)), 60)
+            self.assert_limiter_active()
             self.config(self.host, self.key, 1)
 
     def evidence(self):
@@ -943,12 +1048,15 @@ class Suite:
         passed = sum(item["status"] == "PASS" for item in self.results)
         failed = len(self.results) - passed
         lines = ["# 现有 Kubernetes 集群端到端测试报告", "",
-                 f"- 集群：`{self.args.context}`", f"- 测试命名空间：`{self.ns}`",
+                 f"- 集群：`{self.args.context}`",
+                 f"- API Server：`{getattr(self, 'api_server', '未获取')}`",
+                 f"- 测试命名空间：`{self.ns}`",
                  f"- 当前代码镜像：`{self.args.image}`",
                  f"- 结果：{passed} 通过，{failed} 失败", "",
                  "使用现有 Istio 控制面、两个隔离网关副本、真实 WASM、Counter Service 和 Redis。",
                  "业务上游为可控 HTTP/SSE fixture；Counter Service 前置透明故障代理用于注入异常。",
-                 "测试 TTL=1500ms、metric_key_limit=8；测试环境不代表生产容量或长期稳定性验收。",
+                 ("限流专项：未部署或验收已废弃的 token-stats。" if self.args.rate_limiter_only else "包含已废弃 token-stats 的既有用例。"),
+                 "测试 TTL=1500ms；测试环境不代表生产容量或长期稳定性验收。",
                  "", "| 用例 | 结果 | 证据 |", "| --- | --- | --- |"]
         for item in self.results:
             detail = str(item["detail"]).replace("|", "\\|").replace("\n", " ")
@@ -977,13 +1085,15 @@ class Suite:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--context", required=True)
+    parser.add_argument("--context", default="kind-kind",
+                        help="本地 Kubernetes context（默认 kind-kind，不读取 current-context）")
     parser.add_argument("--namespace", default="rate-limiter-e2e-" + time.strftime("%Y%m%d-%H%M%S"))
     parser.add_argument("--image", required=True)
     parser.add_argument("--artifacts", required=True, help="本次镜像对应的 WASM 目录")
     parser.add_argument("--output", default="dist/e2e/" + time.strftime("%Y%m%d-%H%M%S"))
     parser.add_argument("--keep", action="store_true", help="保留隔离测试资源供调试")
     parser.add_argument("--fault-wasm", help="可选：故意初始化失败或 trap 的测试 WASM，仅用于隔离测试")
+    parser.add_argument("--rate-limiter-only", action="store_true", help="仅部署和验证限流，跳过已废弃的统计功能")
     parser.add_argument("--loading-only", action="store_true", help="仅运行插件加载故障与冷启动测试")
     args = parser.parse_args()
     suite = Suite(args)
@@ -992,7 +1102,8 @@ def main():
         if not args.loading_only:
             suite.counter_cases()
             suite.gateway_cases()
-            suite.metric_cases()
+            if not args.rate_limiter_only:
+                suite.metric_cases()
             suite.failure_cases()
         suite.loading_failure_cases()
         suite.evidence()

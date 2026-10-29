@@ -1,5 +1,20 @@
 # Counter Service 分布式限流 WASM 落地 Implementation Plan
 
+> 状态：历史记录，已由[当前限流契约](../../specs/rate-limiting-contract.md)替代。
+>
+> 异步调用已落地；原来保留的 dispatch 失败拒绝已取消。allowed=false 只有 limit_exceeded 可拒绝，非法配置不能当作策略拒绝。
+
+## 当前行为修正
+
+- 具体 key 的精确、直接父域、全局规则优先，再按相同顺序匹配空 key 的域名规则；enabled=false 逐条跳过，最终无规则直接放行。
+- 只有命中启用规则后超限才拒绝；dispatch、Redis 或配置损坏均 fail-open，不转本地降级。损坏候选不回退。
+- Redis 配置键为 domain + SHA256(api_key)，并发占用为实际域名 + 选中key摘要的 ZSET；空 key 也有固定摘要。
+- 配置写入必须有布尔 enabled；如携带 api_key_hash 必须与原始key一致。查询对象没有 api_key，tier已删除，description省略保留、空串清空，域名统一小写。
+- token-stats 已废弃；当前限流验收使用 --rate-limiter-only，不依赖统计或旧指标提取配置。
+
+<details>
+<summary>原始历史设计与实施片段（已替代，不可作为当前指令执行）</summary>
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 让 Counter Service 分布式限流在 WASM 中真实可用：移除 WASM 不安全的 `internal/store` HTTP 实现，统一 `/acquire` 契约为 `HTTP 200 + allowed=true|false` 表达策略结果，并把插件在“已成功 dispatch 后失败”的处理改成 fail-open 透传。
@@ -445,3 +460,5 @@ git commit -m "refactor: finalize distributed wasm rate limit flow"
   - `bash ./build.sh`
 
 Plan complete and saved to `docs/superpowers/plans/2026-03-18-counter-service-distributed-wasm-implementation.md`. Ready to execute?
+
+</details>

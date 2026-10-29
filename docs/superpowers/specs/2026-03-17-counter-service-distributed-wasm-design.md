@@ -1,4 +1,20 @@
 # Counter Service 分布式限流在 WASM 内真实可用：设计说明（方案 1）
+
+> 状态：历史记录，已由[当前限流契约](../../specs/rate-limiting-contract.md)替代。
+>
+> dispatch 失败也必须 fail-open。仅 limit_exceeded 是策略拒绝；无配置或禁用规则不会拒绝，配置损坏返回内部500。
+
+## 当前行为修正
+
+- 具体 key 的精确、直接父域、全局规则优先，再按相同顺序匹配空 key 的域名规则；enabled=false 逐条跳过，最终无规则直接放行。
+- 只有命中启用规则后超限才拒绝；dispatch、Redis 或配置损坏均 fail-open，不转本地降级。损坏候选不回退。
+- Redis 配置键为 domain + SHA256(api_key)，并发占用为实际域名 + 选中key摘要的 ZSET；空 key 也有固定摘要。
+- 配置写入必须有布尔 enabled；如携带 api_key_hash 必须与原始key一致。查询对象没有 api_key，tier已删除，description省略保留、空串清空，域名统一小写。
+- token-stats 已废弃；当前限流验收使用 --rate-limiter-only，不依赖统计或旧指标提取配置。
+
+<details>
+<summary>原始历史设计与实施片段（已替代，不可作为当前指令执行）</summary>
+
 日期：2026-03-17
 
 ## 背景 / 问题陈述
@@ -11,11 +27,11 @@
 
 根因定位：
 
-1. WASM 构建产物中包含了 [internal/store/client.go](internal/store/client.go) 的真实 HTTP 客户端实现，其使用：
-   - `go func()`（如 [internal/store/client.go:94](internal/store/client.go#L94)）
+1. WASM 构建产物中包含了 [internal/store/client.go](../../../rate-limiter/internal/store/client.go) 的真实 HTTP 客户端实现，其使用：
+   - `go func()`（如 [internal/store/client.go:94](../../../rate-limiter/internal/store/client.go#L94)）
    - `net/http`、`context.WithTimeout`（这些在 TinyGo 标准库实现里也会间接启动 goroutine）
 
-2. 但 TinyGo 构建参数为 `-scheduler=none`（见 [build.sh](build.sh)），在该配置下任何 goroutine 都是不允许的。
+2. 但 TinyGo 构建参数为 `-scheduler=none`（见 [build.sh](../../../build.sh)），在该配置下任何 goroutine 都是不允许的。
 
 同时，从 Proxy-WASM 运行时能力角度看，WASM 内进行传统 socket 形式的 `net/http.Client` 也不符合 Envoy Proxy-WASM 的典型运行模型；正确方式是通过 host call `proxywasm.DispatchHttpCall()` 进行异步 HTTP callout。
 
@@ -73,7 +89,7 @@
 
 #### Acquire（OnHttpRequestHeaders）
 
-关键实现点已存在于 [internal/plugin/root.go:185-226](internal/plugin/root.go#L185-L226)：
+关键实现点已存在于 [internal/plugin/root.go:185-226](../../../rate-limiter/internal/plugin/root.go#L185-L226)：
 
 1. 读取 `:authority`，并做 domain normalize。
 2. 构造 JSON body（字段固定为选项 A）：
@@ -87,7 +103,7 @@
 
 #### Acquire 回调（onAcquireResponse）
 
-关键语义已存在于 [internal/plugin/root.go:544-619](internal/plugin/root.go#L544-L619)，但本次设计将错误处理更新为 **fail-open（仅限已成功 dispatch 后的失败）**：
+关键语义已存在于 [internal/plugin/root.go:544-619](../../../rate-limiter/internal/plugin/root.go#L544-L619)，但本次设计将错误处理更新为 **fail-open（仅限已成功 dispatch 后的失败）**：
 
 - status != 200：**直接 Resume 透传请求**（不 fallback 到本地 limiter）
 - 响应体解析失败：**直接 Resume 透传请求**（不 fallback）
@@ -99,7 +115,7 @@
 
 #### Release（OnHttpStreamDone）
 
-关键实现点已存在于 [internal/plugin/root.go:418-455](internal/plugin/root.go#L418-L455)：
+关键实现点已存在于 [internal/plugin/root.go:418-455](../../../rate-limiter/internal/plugin/root.go#L418-L455)：
 
 - 如果持有 `distributedLeaseID`：best-effort callout `/release`，忽略响应。
 
@@ -113,7 +129,7 @@
   - 不 import `net/http`
   - 不使用 `go func()`
   - 不使用 `context.WithTimeout`（避免标准库内部 goroutine）
-- 在 counter_service 分布式模式下，插件不会调用 `store.NewClient(...)`，这一点已由 [internal/plugin/root.go:652-664](internal/plugin/root.go#L652-L664) 明确。
+- 在 counter_service 分布式模式下，插件不会调用 `store.NewClient(...)`，这一点已由 [internal/plugin/root.go:652-664](../../../rate-limiter/internal/plugin/root.go#L652-L664) 明确。
 
 ### API 契约
 
@@ -133,7 +149,7 @@ Acquire 响应（**状态码契约：总是 200 表达策略结果**）：
 
 - `allowed=true`：`lease_id` **必须**非空且全局唯一；若无法生成 lease，应返回 5xx（触发插件 fail-open），禁止 200 + allowed=true + 空 lease_id。
 
-> 说明：这是为了与插件最新语义对齐。插件的 `onAcquireResponse`（见 [internal/plugin/root.go:544-619](internal/plugin/root.go#L544-L619)）在已成功 dispatch 后若收到 `status != 200`，会直接 `ResumeHttpRequest()` 透传，而不是 fallback 到本地 limiter；因此“策略拒绝”必须继续使用 `HTTP 200 + allowed=false` 表达，避免被误判为基础设施故障并放行。
+> 说明：这是为了与插件最新语义对齐。插件的 `onAcquireResponse`（见 [internal/plugin/root.go:544-619](../../../rate-limiter/internal/plugin/root.go#L544-L619)）在已成功 dispatch 后若收到 `status != 200`，会直接 `ResumeHttpRequest()` 透传，而不是 fallback 到本地 limiter；因此“策略拒绝”必须继续使用 `HTTP 200 + allowed=false` 表达，避免被误判为基础设施故障并放行。
 
 #### /release
 
@@ -195,10 +211,12 @@ Counter Service 侧（契约测试）：
 - /release 对 lease_not_found 必须幂等（200 + released=false）。
 ## 实施影响面（预计修改）
 
-- 修改 [internal/store/client.go](internal/store/client.go) 与 [internal/store/client_test.go](internal/store/client_test.go)：移除真实 HTTP 实现，改为占位并调整测试断言。
+- 修改 [internal/store/client.go](../../../rate-limiter/internal/store/client.go) 与 [internal/store/client_test.go](../../../rate-limiter/internal/store/client_test.go)：移除真实 HTTP 实现，改为占位并调整测试断言。
 - 修改 Counter Service `/acquire` handler：将“策略拒绝（超限/未配置/禁用/配置非法）”从 4xx/429 调整为 **HTTP 200 + allowed=false**（与插件最新 `status!=200` → fail-open 行为对齐）。
 - 可能需要更新/补充插件侧测试，验证 async callout 分支在编译与逻辑上保持正确。
 
 ---
 
 该文档为设计说明（spec），用于后续生成实现计划与执行步骤。
+
+</details>

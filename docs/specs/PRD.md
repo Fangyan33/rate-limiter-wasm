@@ -1,5 +1,20 @@
 # Istio Envoy WebAssembly 并发限流插件需求文档
 
+> 状态：历史记录，已由[当前限流契约](rate-limiting-contract.md)替代。
+>
+> 原需求仅作追溯。当前只在启用规则超限时拒绝，无规则或禁用放行；非法配置/后端故障fail-open，加载失败禁用功能。Token统计已废弃。
+
+## 当前行为修正
+
+- 具体 key 的精确、直接父域、全局规则优先，再按相同顺序匹配空 key 的域名规则；enabled=false 逐条跳过，最终无规则直接放行。
+- 只有命中启用规则后超限才拒绝；dispatch、Redis 或配置损坏均 fail-open，不转本地降级。损坏候选不回退。
+- Redis 配置键为 domain + SHA256(api_key)，并发占用为实际域名 + 选中key摘要的 ZSET；空 key 也有固定摘要。
+- 配置写入必须有布尔 enabled；如携带 api_key_hash 必须与原始key一致。查询对象没有 api_key，tier已删除，description省略保留、空串清空，域名统一小写。
+- token-stats 已废弃；当前限流验收使用 --rate-limiter-only，不依赖统计或旧指标提取配置。
+
+<details>
+<summary>原始历史设计与实施片段（已替代，不可作为当前指令执行）</summary>
+
 > 状态：历史需求与设计记录，保留原始需求用于追溯，不作为当前已交付能力清单。当前部署与配置以 [README](../../README.md) 为准，双插件职责边界见 [拆分规范](2026-04-10-wasm-plugin-split-spec.md)。
 >
 > 当前实现已拆分为 `rate-limiter` 和 `token-stats`。分布式限流通过 Counter Service + Redis，配置使用 `backend: counter_service`；Token 指标按 `domain/uid` 聚合。下文的 Redis 直连配置、按 API Key/model 聚合、限流指标和本地计数热更新要求应结合各节状态说明阅读。
@@ -359,3 +374,5 @@ Rate limit exceeded for API key
 - 集成外部配置中心（如 etcd）实现更灵活的动态配置
 - 提供管理 API 查询实时并发状态
 - 扩展更多分布式共享计数后端（如 etcd、Consul 或专用限流服务）
+
+</details>

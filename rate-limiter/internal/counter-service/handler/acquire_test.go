@@ -160,11 +160,8 @@ func TestAcquireHandler_ConfigMiss(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-	if allowed, ok := resp["allowed"].(bool); !ok || allowed {
-		t.Errorf("expected allowed=false for config miss, got %#v", resp["allowed"])
-	}
-	if reason, ok := resp["reason"].(string); !ok || reason != "config_not_found" {
-		t.Errorf("expected reason=config_not_found, got %#v", resp["reason"])
+	if resp["allowed"] != true || resp["lease_id"] != nil || resp["reason"] != nil {
+		t.Fatalf("expected unmetered success, got %#v", resp)
 	}
 }
 
@@ -194,11 +191,8 @@ func TestAcquireHandler_DisabledConfig(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-	if allowed, ok := resp["allowed"].(bool); !ok || allowed {
-		t.Errorf("expected allowed=false for disabled config, got %#v", resp["allowed"])
-	}
-	if reason, ok := resp["reason"].(string); !ok || reason != "api_key_disabled" {
-		t.Errorf("expected reason=api_key_disabled, got %#v", resp["reason"])
+	if resp["allowed"] != true || resp["lease_id"] != nil || resp["reason"] != nil {
+		t.Fatalf("expected unmetered success, got %#v", resp)
 	}
 }
 

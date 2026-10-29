@@ -43,7 +43,6 @@ func TestSetGetConfig(t *testing.T) {
 		APIKey:        "key001",
 		MaxConcurrent: 10,
 		Enabled:       true,
-		Tier:          "premium",
 		Description:   "Premium tier",
 	}
 
@@ -59,11 +58,9 @@ func TestSetGetConfig(t *testing.T) {
 	require.NotNil(t, got)
 
 	assert.Equal(t, cfg.Domain, got.Domain)
-	assert.Equal(t, cfg.APIKey, got.APIKey)
 	assert.Equal(t, sha256Hex(cfg.APIKey), got.APIKeyHash)
 	assert.Equal(t, cfg.MaxConcurrent, got.MaxConcurrent)
 	assert.Equal(t, cfg.Enabled, got.Enabled)
-	assert.Equal(t, cfg.Tier, got.Tier)
 	assert.Equal(t, cfg.Description, got.Description)
 	assert.Greater(t, got.UpdatedAt, int64(0))
 }
@@ -110,9 +107,6 @@ func TestListConfigs(t *testing.T) {
 	// 验证内容
 	found := 0
 	for _, c := range result.Configs {
-		if c.APIKey != "" {
-			t.Fatalf("expected list configs to omit plaintext api_key, got %+v", c)
-		}
 		if c.APIKeyHash == sha256Hex("k1") || c.APIKeyHash == sha256Hex("k2") || c.APIKeyHash == sha256Hex("k3") {
 			found++
 		}

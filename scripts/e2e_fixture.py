@@ -84,12 +84,14 @@ class Handler(BaseHTTPRequestHandler):
                 status, data = int(mode), b'{"error":"injected"}'
             elif mode == "invalid":
                 status, data = 200, b"not-json"
-            elif mode in ("empty", "null", "missing_allowed", "unknown_denial", "internal_error", "invalid_config", "oversize"):
+            elif mode in ("empty", "null", "missing_allowed", "unknown_denial", "internal_error", "invalid_config", "api_key_disabled", "config_not_found", "oversize"):
                 status = 200
                 data = {"empty": b"", "null": b"null", "missing_allowed": b"{}",
                         "unknown_denial": b'{"allowed":false,"reason":"unknown"}',
                         "internal_error": b'{"allowed":false,"reason":"internal_error"}',
                         "invalid_config": b'{"allowed":false,"reason":"invalid_config"}',
+                        "api_key_disabled": b'{"allowed":false,"reason":"api_key_disabled"}',
+                        "config_not_found": b'{"allowed":false,"reason":"config_not_found"}',
                         "oversize": b"x" * (64*1024+1)}[mode]
             elif mode == "missing":
                 status, data = 200, b'{"renewed":false,"reason":"lease_not_found"}'

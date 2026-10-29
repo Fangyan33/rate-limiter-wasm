@@ -4,7 +4,7 @@ import (
 	"strings"
 )
 
-// Lua 脚本内容（直接来自设计文档，稍作格式整理）
+// Atomic policy selection, lease accounting and lifecycle scripts.
 const (
 	acquireScript = `-- acquire_with_config.lua (ZSET model)
 -- KEYS[1]: config_key        (rl:config:<domain>:<api_key_sha256>)
@@ -34,38 +34,33 @@ local function get_config(key)
     return result
 end
 
--- Resolve domain rules first, and select their shared counter atomically.
-local config = get_config(KEYS[6])
-if not config then
-    config = get_config(KEYS[7])
-end
-if not config then
-    config = get_config(KEYS[8])
-end
-local leases_key = KEYS[9]
-if not config then
-    leases_key = KEYS[2]
-    config = get_config(KEYS[1])
-    if not config then
-        config = get_config(KEYS[4])
+-- Resolve specific-key rules first, then domain rules. Disabled entries are skipped.
+local config = nil
+local leases_key = nil
+for _, index in ipairs({1, 4, 5, 6, 7, 8}) do
+    local candidate = get_config(KEYS[index])
+    if candidate then
+        if candidate.enabled ~= "true" and candidate.enabled ~= "false" then
+            return cjson.encode({allowed = false, reason = "invalid_config", message = "Invalid enabled configuration"})
+        end
+        if candidate.enabled == "true" then
+            local raw_limit = candidate.max_concurrent or ""
+            local limit = tonumber(raw_limit)
+            if not string.match(raw_limit, '^[1-9][0-9]*$') or not limit or limit == math.huge then
+                return cjson.encode({allowed = false, reason = "invalid_config", message = "Invalid max_concurrent configuration"})
+            end
+            config = candidate
+            leases_key = index <= 5 and KEYS[2] or KEYS[9]
+            break
+        end
     end
-    if not config then
-        config = get_config(KEYS[5])
-    end
 end
 
+-- No applicable policy is a normal unmetered success, not a failed acquire.
 if not config then
-    return cjson.encode({allowed = false, reason = "config_not_found", message = "No rate limit configuration found"})
+    return cjson.encode({allowed = true})
 end
-
-if config.enabled ~= "true" then
-    return cjson.encode({allowed = false, reason = "api_key_disabled", message = "API key is disabled"})
-end
-
 local max_concurrent = tonumber(config.max_concurrent)
-if not max_concurrent or max_concurrent <= 0 then
-    return cjson.encode({allowed = false, reason = "invalid_config", message = "Invalid max_concurrent configuration"})
-end
 
 local redis_time = redis.call('TIME')
 local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
@@ -87,8 +82,7 @@ return cjson.encode({
     allowed = true,
     lease_id = lease_id,
     max_concurrent = max_concurrent,
-    current_count = new_count,
-    tier = config.tier or "default"
+    current_count = new_count
 })
 `
 

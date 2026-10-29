@@ -1,5 +1,20 @@
 # Counter Service - Redis 操作层设计
 
+> 状态：历史记录，已由[当前限流契约](../specs/rate-limiting-contract.md)替代。
+>
+> 当前使用哈希配置键、ZSET租约集合；API Key 可为空。环境变量为 REDIS_ADDR、REDIS_PASSWORD、REDIS_KEY_PREFIX、PORT，DB固定0。原连接配置和独立counter示例已替代。
+
+## 当前行为修正
+
+- 具体 key 的精确、直接父域、全局规则优先，再按相同顺序匹配空 key 的域名规则；enabled=false 逐条跳过，最终无规则直接放行。
+- 只有命中启用规则后超限才拒绝；dispatch、Redis 或配置损坏均 fail-open，不转本地降级。损坏候选不回退。
+- Redis 配置键为 domain + SHA256(api_key)，并发占用为实际域名 + 选中key摘要的 ZSET；空 key 也有固定摘要。
+- 配置写入必须有布尔 enabled；如携带 api_key_hash 必须与原始key一致。查询对象没有 api_key，tier已删除，description省略保留、空串清空，域名统一小写。
+- token-stats 已废弃；当前限流验收使用 --rate-limiter-only，不依赖统计或旧指标提取配置。
+
+<details>
+<summary>原始历史设计与实施片段（已替代，不可作为当前指令执行）</summary>
+
 ## 概述
 
 本文档描述 counter-service 的核心 Redis 操作层设计，包括客户端封装、Lua 脚本、原子操作接口和数据模型。
@@ -215,3 +230,5 @@ require (
 1. HTTP API 层 (handler/)
 2. 服务入口 (cmd/counter-service/main.go)
 3. 部署配置 (Kubernetes manifests)
+
+</details>

@@ -1,5 +1,20 @@
 # Counter-Service ZSET 租约集合迁移设计
 
+> 状态：历史记录，已由[当前限流契约](../../specs/rate-limiting-contract.md)替代。
+>
+> ZSET与续约已实现。所有配置/并发集合使用SHA256后缀；具体key优先，禁用跳过，无规则放行，不再按早期三层拒绝流程执行。
+
+## 当前行为修正
+
+- 具体 key 的精确、直接父域、全局规则优先，再按相同顺序匹配空 key 的域名规则；enabled=false 逐条跳过，最终无规则直接放行。
+- 只有命中启用规则后超限才拒绝；dispatch、Redis 或配置损坏均 fail-open，不转本地降级。损坏候选不回退。
+- Redis 配置键为 domain + SHA256(api_key)，并发占用为实际域名 + 选中key摘要的 ZSET；空 key 也有固定摘要。
+- 配置写入必须有布尔 enabled；如携带 api_key_hash 必须与原始key一致。查询对象没有 api_key，tier已删除，description省略保留、空串清空，域名统一小写。
+- token-stats 已废弃；当前限流验收使用 --rate-limiter-only，不依赖统计或旧指标提取配置。
+
+<details>
+<summary>原始历史设计与实施片段（已替代，不可作为当前指令执行）</summary>
+
 > 保持现有基于 `Domain + API Key` 的动态限流配置实现不变，仅将分布式并发占用模型从 `counter + lease` 迁移到 ZSET 租约集合模型，结构性修复 lease 过期导致槽位泄漏的问题。
 
 ## 1. 背景
@@ -307,3 +322,5 @@ ARGV[1]: lease_id          ← 新增，用于 ZREM
 - 对 deploy YAML 的结构性调整
 
 这些可以后续单独做，但不应与本次结构性修复耦合在一起。
+
+</details>

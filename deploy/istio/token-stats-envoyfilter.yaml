@@ -1,3 +1,4 @@
+# 已废弃：token-stats 停止维护，后续完整移除。此清单仅保留现状，不属于限流部署要求。
 apiVersion: networking.istio.io/v1alpha3
 kind: EnvoyFilter
 metadata:
