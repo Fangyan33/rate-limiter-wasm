@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-OUTPUT=${1:-dist/counter-service}
+OUTPUT=${1:-dist/rate-limiter-counter-service}
 
 mkdir -p "$(dirname "$OUTPUT")"
 

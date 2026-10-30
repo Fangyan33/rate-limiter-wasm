@@ -13,13 +13,13 @@ fi
 mkdir -p "$DIST_DIR"
 
 GOFLAGS="${GOFLAGS:-} -buildvcs=false" \
-  tinygo build -o "$DIST_DIR/rate-limiter.wasm" -scheduler=none -target=wasi "$ROOT_DIR/rate-limiter/cmd/wasm"
+  tinygo build -o "$DIST_DIR/rate-limiter-plugin.wasm" -scheduler=none -target=wasi "$ROOT_DIR/rate-limiter/cmd/wasm"
 
 GOFLAGS="${GOFLAGS:-} -buildvcs=false" \
-  tinygo build -o "$DIST_DIR/token-stats.wasm" -scheduler=none -target=wasi "$ROOT_DIR/token-stats/cmd/wasm"
+  tinygo build -o "$DIST_DIR/rate-limiter-token-stats.wasm" -scheduler=none -target=wasi "$ROOT_DIR/token-stats/cmd/wasm"
 
 echo "built wasm artifacts:"
-echo "  $DIST_DIR/rate-limiter.wasm"
-echo "  $DIST_DIR/token-stats.wasm"
+echo "  $DIST_DIR/rate-limiter-plugin.wasm"
+echo "  $DIST_DIR/rate-limiter-token-stats.wasm"
 
-sha256sum "$DIST_DIR/rate-limiter.wasm" "$DIST_DIR/token-stats.wasm"
+sha256sum "$DIST_DIR/rate-limiter-plugin.wasm" "$DIST_DIR/rate-limiter-token-stats.wasm"

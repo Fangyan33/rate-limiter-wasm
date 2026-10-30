@@ -78,7 +78,7 @@ class Suite:
         self.key = jwt("basic_001")
         self.key2 = jwt("premium_001")
         self.host = "api.e2e.test"
-        self.service = self.ns + "/fixture"
+        self.service = self.ns + "/rate-limiter-e2e-fixture"
         self.peer_ns = self.ns + "-peer"
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
@@ -134,35 +134,35 @@ class Suite:
                                     "annotations": {"sidecar.istio.io/inject": "false"}},
                                     "spec": {"containers": [container], **pod_extra}}})
 
-        deployment("redis", {"name": "redis", "image": "redis:8.6.1",
+        deployment("rate-limiter-e2e-redis", {"name": "rate-limiter-e2e-redis", "image": "redis:8.6.1",
                     "imagePullPolicy": "Never", "args": ["--save", "", "--appendonly", "no"],
                     "readinessProbe": {"exec": {"command": ["redis-cli", "ping"]},
                                        "periodSeconds": 2}})
-        service("redis", 6379)
-        deployment("counter-service", {"name": "counter-service", "image": self.args.image,
-                    "imagePullPolicy": "Never", "env": [{"name": "REDIS_ADDR", "value": "redis:6379"}],
+        service("rate-limiter-e2e-redis", 6379)
+        deployment("rate-limiter-e2e-counter-service", {"name": "rate-limiter-e2e-counter-service", "image": self.args.image,
+                    "imagePullPolicy": "Never", "env": [{"name": "REDIS_ADDR", "value": "rate-limiter-e2e-redis:6379"}],
                     "readinessProbe": {"httpGet": {"path": "/health", "port": 8080},
                                        "periodSeconds": 2}})
-        service("counter-service")
-        fixture_config = obj("ConfigMap", "fixture", data={"server.py": (ROOT / "scripts/e2e_fixture.py").read_text()})
+        service("rate-limiter-e2e-counter-service")
+        fixture_config = obj("ConfigMap", "rate-limiter-e2e-fixture", data={"server.py": (ROOT / "scripts/e2e_fixture.py").read_text()})
         if self.args.fault_wasm:
             fixture_config["binaryData"] = {"fault.wasm": base64.b64encode(Path(self.args.fault_wasm).read_bytes()).decode()}
-        deployment("fixture", {"name": "fixture", "image": "python:3.10-slim",
+        deployment("rate-limiter-e2e-fixture", {"name": "rate-limiter-e2e-fixture", "image": "python:3.10-slim",
                     "imagePullPolicy": "Never", "command": ["python", "/app/server.py"],
-                    "env": [{"name": "COUNTER_ADDR", "value": "counter-service:8080"}],
+                    "env": [{"name": "COUNTER_ADDR", "value": "rate-limiter-e2e-counter-service:8080"}],
                     "volumeMounts": [{"name": "code", "mountPath": "/app"}],
                     "readinessProbe": {"httpGet": {"path": "/health", "port": 8080},
                                        "periodSeconds": 2}},
-                    volumes=[{"name": "code", "configMap": {"name": "fixture"}}])
-        obj("Service", "fixture", {"selector": {"app": "fixture"}, "ports": [
+                    volumes=[{"name": "code", "configMap": {"name": "rate-limiter-e2e-fixture"}}])
+        obj("Service", "rate-limiter-e2e-fixture", {"selector": {"app": "rate-limiter-e2e-fixture"}, "ports": [
             {"name": "http-main", "port": 8080, "targetPort": 8080},
             {"name": "http-alternate", "port": 8081, "targetPort": 8080}]})
-        obj("Service", "fixture-alt", {"selector": {"app": "fixture"}, "ports": [
+        obj("Service", "rate-limiter-e2e-fixture-alt", {"selector": {"app": "rate-limiter-e2e-fixture"}, "ports": [
             {"name": "http", "port": 8080, "targetPort": 8080}]})
-        obj("DestinationRule", "fixture", {"host": f"fixture.{ns}.svc.cluster.local", "subsets": [
-            {"name": "v1", "labels": {"app": "fixture"}},
-            {"name": "v2", "labels": {"app": "fixture"}}]})
-        gateway = deployment("e2e-gateway", {"name": "istio-proxy", "image": "auto",
+        obj("DestinationRule", "rate-limiter-e2e-fixture", {"host": f"rate-limiter-e2e-fixture.{ns}.svc.cluster.local", "subsets": [
+            {"name": "v1", "labels": {"app": "rate-limiter-e2e-fixture"}},
+            {"name": "v2", "labels": {"app": "rate-limiter-e2e-fixture"}}]})
+        gateway = deployment("rate-limiter-e2e-gateway", {"name": "istio-proxy", "image": "auto",
                     "imagePullPolicy": "IfNotPresent", "env": [
                         {"name": "ISTIO_META_UNPRIVILEGED_POD", "value": "true"}],
                     "ports": [{"containerPort": 8080}],
@@ -173,7 +173,7 @@ class Suite:
         meta["annotations"] = {"sidecar.istio.io/inject": "true",
                                "inject.istio.io/templates": "gateway",
                                "proxy.istio.io/config": '{"concurrency":2}'}
-        obj("Gateway", "e2e", {"selector": {"app": "e2e-gateway", "istio": "rate-limiter-e2e"},
+        obj("Gateway", "rate-limiter-e2e", {"selector": {"app": "rate-limiter-e2e-gateway", "istio": "rate-limiter-e2e"},
             "servers": [{"port": {"number": 8080, "name": "http-e2e", "protocol": "HTTP"},
                          "hosts": ["*.e2e.test", "unmatched.test", "no-route.test"]}]})
         def route(prefix, host, port=8080, subset=None):
@@ -181,22 +181,24 @@ class Suite:
             if subset:
                 destination["subset"] = subset
             return {"match": [{"uri": {"prefix": prefix}}], "route": [{"destination": destination}], "timeout": "20s"}
-        routes = [route("/short", "fixture"), route("/port", "fixture", 8081),
-                  route("/other", "fixture-alt"), route("/peer", f"fixture.{self.peer_ns}.svc.cluster.local")]
+        routes = [route("/short", "rate-limiter-e2e-fixture"), route("/port", "rate-limiter-e2e-fixture", 8081),
+                  route("/other", "rate-limiter-e2e-fixture-alt"), route("/peer", f"rate-limiter-e2e-fixture.{self.peer_ns}.svc.cluster.local")]
         routes.append({"match": [{"uri": {"prefix": "/subset"}}], "route": [
-            {"destination": {"host": "fixture", "subset": subset, "port": {"number": 8080}}, "weight": 50}
+            {"destination": {"host": "rate-limiter-e2e-fixture", "subset": subset, "port": {"number": 8080}}, "weight": 50}
             for subset in ("v1", "v2")], "timeout": "20s"})
         routes.append({"match": [{"uri": {"prefix": "/weighted"}}], "route": [
             {"destination": {"host": host, "port": {"number": 8080}}, "weight": 50}
-            for host in ("fixture", "fixture-alt")], "timeout": "20s"})
-        routes.append(route("/", f"fixture.{ns}.svc.cluster.local"))
-        obj("VirtualService", "e2e", {"hosts": ["*.e2e.test", "unmatched.test"], "gateways": ["e2e"], "http": routes})
+            for host in ("rate-limiter-e2e-fixture", "rate-limiter-e2e-fixture-alt")], "timeout": "20s"})
+        routes.append(route("/", f"rate-limiter-e2e-fixture.{ns}.svc.cluster.local"))
+        obj("VirtualService", "rate-limiter-e2e", {"hosts": ["*.e2e.test", "unmatched.test"], "gateways": ["rate-limiter-e2e"], "http": routes})
         for plugin in (("rate-limiter",) if self.args.rate_limiter_only else ("rate-limiter", "token-stats")):
-            digest = hashlib.sha256((Path(self.args.artifacts) / (plugin + ".wasm")).read_bytes()).hexdigest()
+            wasm = "rate-limiter-plugin.wasm" if plugin == "rate-limiter" else "rate-limiter-token-stats.wasm"
+            plugin_name = "rate-limiter-e2e-plugin" if plugin == "rate-limiter" else "rate-limiter-e2e-token-stats"
+            digest = hashlib.sha256((Path(self.args.artifacts) / wasm).read_bytes()).hexdigest()
             config = "" if plugin == "rate-limiter" else "domains:\n  - '*.e2e.test'\n"
             if plugin == "rate-limiter":
                 config += ("distributed_limit:\n  enabled: true\n  backend: counter_service\n"
-                           "  counter_service:\n    cluster: e2e-counter\n    acquire_path: /acquire\n"
+                           "  counter_service:\n    cluster: rate-limiter-e2e-counter\n    acquire_path: /acquire\n"
                            "    release_path: /release\n    renew_path: /renew\n"
                            "    timeout_ms: 800\n    lease_ttl_ms: 1500\n"
                            "error_response:\n  status_code: 429\n  message: Rate limit exceeded\n")
@@ -205,7 +207,7 @@ class Suite:
                            "  metric_key_limit: 8\n")
             patches = []
             if plugin == "rate-limiter":
-                for name, target in (("e2e-counter", "fixture"), ("e2e-wasm", "counter-service")):
+                for name, target in (("rate-limiter-e2e-counter", "rate-limiter-e2e-fixture"), ("rate-limiter-e2e-wasm", "rate-limiter-e2e-counter-service")):
                     patches.append({"applyTo": "CLUSTER", "match": {"context": "GATEWAY"},
                         "patch": {"operation": "ADD", "value": {"name": name, "type": "STRICT_DNS",
                             "connect_timeout": "1s", "load_assignment": {"cluster_name": name,
@@ -216,10 +218,10 @@ class Suite:
                     "subFilter": {"name": "envoy.filters.http.router"}}}}},
                 "patch": {"operation": "INSERT_BEFORE", "value": {"name": "envoy.filters.http.wasm",
                     "typed_config": {"@type": "type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm",
-                        "config": {"name": plugin, "root_id": plugin + "-root", "vm_config": {
-                            "vm_id": plugin + "-vm", "runtime": "envoy.wasm.runtime.v8", "code": {"remote": {
-                                "http_uri": {"uri": f"http://counter-service.{ns}.svc.cluster.local:8080/wasm/{plugin}.wasm",
-                                             "cluster": "e2e-wasm", "timeout": "10s"}, "sha256": digest}}},
+                        "config": {"name": plugin_name, "root_id": plugin_name + "-root", "vm_config": {
+                            "vm_id": plugin_name + "-vm", "runtime": "envoy.wasm.runtime.v8", "code": {"remote": {
+                                "http_uri": {"uri": f"http://rate-limiter-e2e-counter-service.{ns}.svc.cluster.local:8080/wasm/{wasm}",
+                                             "cluster": "rate-limiter-e2e-wasm", "timeout": "10s"}, "sha256": digest}}},
                             "configuration": {"@type": "type.googleapis.com/google.protobuf.StringValue",
                                               "value": config}}}}}})
             http_filter = patches.pop()
@@ -227,7 +229,7 @@ class Suite:
             wasm_config = value.pop("typed_config")
             wasm_config["config"]["fail_open"] = True
             wasm_config["config"]["vm_config"]["nack_on_code_cache_miss"] = True
-            name = plugin + "-wasm"
+            name = plugin_name + "-wasm"
             value["name"] = name
             value["config_discovery"] = {
                 "config_source": {"ads": {}}, "apply_default_config_without_warming": True,
@@ -239,8 +241,8 @@ class Suite:
                             "patch": {"operation": "ADD", "value": {"name": name,
                                                                       "typed_config": wasm_config}}})
             patches.append(http_filter)
-            obj("EnvoyFilter", plugin, {"workloadSelector": {"labels": {
-                "app": "e2e-gateway", "istio": "rate-limiter-e2e"}}, "configPatches": patches})
+            obj("EnvoyFilter", plugin_name, {"workloadSelector": {"labels": {
+                "app": "rate-limiter-e2e-gateway", "istio": "rate-limiter-e2e"}}, "configPatches": patches})
         return {"apiVersion": "v1", "kind": "List", "items": docs}
 
     def forward(self, target, *remote):
@@ -277,15 +279,15 @@ class Suite:
         # Envoy 1.21 下载 remote WASM 失败后不会因业务端点就绪而自动重试。
         # 先确保下载源可用，再创建带 WASM 过滤器的网关监听器。
         base = [item for item in manifest["items"] if item["kind"] in ("Service", "ConfigMap") or
-                item["kind"] == "Deployment" and item["metadata"]["name"] != "e2e-gateway"]
+                item["kind"] == "Deployment" and item["metadata"]["name"] != "rate-limiter-e2e-gateway"]
         self.k("apply", "--server-side", "-f", "-", data={"apiVersion": "v1", "kind": "List", "items": base})
-        for name in ("redis", "counter-service", "fixture"):
+        for name in ("rate-limiter-e2e-redis", "rate-limiter-e2e-counter-service", "rate-limiter-e2e-fixture"):
             self.k("-n", self.ns, "rollout", "status", "deployment/" + name, "--timeout=180s", timeout=190)
         self.k("apply", "--server-side", "-f", "-", data=manifest)
-        self.k("-n", self.ns, "rollout", "status", "deployment/e2e-gateway", "--timeout=180s", timeout=190)
-        self.cs = self.forward("service/counter-service", 8080)[0]
-        self.fixture = self.forward("service/fixture", 8080)[0]
-        pods = json.loads(self.k("-n", self.ns, "get", "pods", "-l", "app=e2e-gateway", "-o", "json"))["items"]
+        self.k("-n", self.ns, "rollout", "status", "deployment/rate-limiter-e2e-gateway", "--timeout=180s", timeout=190)
+        self.cs = self.forward("service/rate-limiter-e2e-counter-service", 8080)[0]
+        self.fixture = self.forward("service/rate-limiter-e2e-fixture", 8080)[0]
+        pods = json.loads(self.k("-n", self.ns, "get", "pods", "-l", "app=rate-limiter-e2e-gateway", "-o", "json"))["items"]
         self.pods = sorted(p["metadata"]["name"] for p in pods)
         check(len(self.pods) == 2, "需要两个就绪的网关副本")
         self.gw = [self.forward("pod/" + p, 8080, 15090, 15000) for p in self.pods]
@@ -297,12 +299,12 @@ class Suite:
         eventually(lambda: self.gateway(host="unmatched.test")["status"] == 200, 40)
         # ECDS starts with a pass-through default. Confirm rate limiting is active
         # before testing policy behavior, rather than mistaking fallback for success.
-        fixture = json.loads(self.k("-n", self.ns, "get", "pods", "-l", "app=fixture", "-o", "json"))["items"][0]
+        fixture = json.loads(self.k("-n", self.ns, "get", "pods", "-l", "app=rate-limiter-e2e-fixture", "-o", "json"))["items"][0]
         peer = {"apiVersion": "v1", "kind": "List", "items": [
             {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": self.peer_ns}},
-            {"apiVersion": "v1", "kind": "Service", "metadata": {"name": "fixture", "namespace": self.peer_ns},
+            {"apiVersion": "v1", "kind": "Service", "metadata": {"name": "rate-limiter-e2e-fixture", "namespace": self.peer_ns},
              "spec": {"ports": [{"name": "http", "port": 8080, "targetPort": 8080}]}},
-            {"apiVersion": "v1", "kind": "Endpoints", "metadata": {"name": "fixture", "namespace": self.peer_ns},
+            {"apiVersion": "v1", "kind": "Endpoints", "metadata": {"name": "rate-limiter-e2e-fixture", "namespace": self.peer_ns},
              "subsets": [{"addresses": [{"ip": fixture["status"]["podIP"]}], "ports": [{"name": "http", "port": 8080}]}]}]}
         self.k("apply", "-f", "-", data=peer)
         self.assert_limiter_active()
@@ -367,7 +369,7 @@ class Suite:
                 all(e["request"].get(k) == v for k, v in fields.items())]
 
     def redis(self, *args):
-        return self.k("-n", self.ns, "exec", "deployment/redis", "--", "redis-cli", "--raw", *args).strip()
+        return self.k("-n", self.ns, "exec", "deployment/rate-limiter-e2e-redis", "--", "redis-cli", "--raw", *args).strip()
 
     def leases(self, service=None, key=None, port=8080):
         service = service or self.service
@@ -442,7 +444,7 @@ class Suite:
 
         def validation():
             payload = {"service": self.service, "port": 8080, "enabled": True, "max_concurrent": 1}
-            invalid = [{**payload, "service": v} for v in ("fixture", f"fixture.{self.ns}.svc.cluster.local", "*", self.ns + "/*")]
+            invalid = [{**payload, "service": v} for v in ("rate-limiter-e2e-fixture", f"rate-limiter-e2e-fixture.{self.ns}.svc.cluster.local", "*", self.ns + "/*")]
             invalid += [{**payload, "port": v} for v in (None, 0, 65536, 1.5, "8080")]
             invalid += [{**payload, "domain": self.host}, {**payload, "enabled": None}]
             for data in invalid:
@@ -551,7 +553,7 @@ class Suite:
         self.run_case("GW-服务端口默认额度", default_pool)
 
         def isolation():
-            identities = [(self.service, 8081, "/port"), (self.ns + "/fixture-alt", 8080, "/other"), (self.peer_ns + "/fixture", 8080, "/peer")]
+            identities = [(self.service, 8081, "/port"), (self.ns + "/rate-limiter-e2e-fixture-alt", 8080, "/other"), (self.peer_ns + "/rate-limiter-e2e-fixture", 8080, "/peer")]
             for service, port, path in identities:
                 self.config(service, self.key, port=port)
             try:
@@ -574,15 +576,15 @@ class Suite:
         def weighted():
             self.control(clear=True)
             self.config(self.service, self.key, 1)
-            self.config(self.ns + "/fixture-alt", self.key, 1)
+            self.config(self.ns + "/rate-limiter-e2e-fixture-alt", self.key, 1)
             try:
                 for path in ("/subset", "/weighted"):
                     for _ in range(30):
                         check(self.gateway(key=self.key, path=path)["status"] == 200, "加权路由失败")
-                        self.idle();self.idle(self.ns + "/fixture-alt")
+                        self.idle();self.idle(self.ns + "/rate-limiter-e2e-fixture-alt")
                 events = self.events("acquire", api_key=self.key)
                 seen = {e["request"]["upstream_cluster"] for e in events}
-                expected = {self.cluster(subset="v1"), self.cluster(subset="v2"), self.cluster(), self.cluster(self.ns + "/fixture-alt")}
+                expected = {self.cluster(subset="v1"), self.cluster(subset="v2"), self.cluster(), self.cluster(self.ns + "/rate-limiter-e2e-fixture-alt")}
                 check(expected <= seen, seen)
                 for event in events:
                     result = json.loads(event["body"])
@@ -597,7 +599,7 @@ class Suite:
                 self.save("weighted-route-targets.json", events)
                 return "读取加权路由实际选中cluster；v1/v2共享服务端口池，跨服务分别计数"
             finally:
-                self.delete(self.ns + "/fixture-alt", self.key)
+                self.delete(self.ns + "/rate-limiter-e2e-fixture-alt", self.key)
         self.run_case("GW-subset及加权路由", weighted)
 
         def hot_update():
@@ -841,23 +843,23 @@ class Suite:
         try:
             self.idle()
             self.control(clear=True)
-            self.k("-n", self.ns, "scale", "deployment/redis", "--replicas=0")
-            eventually(lambda: not json.loads(self.k("-n", self.ns, "get", "endpoints", "redis", "-o", "json")).get("subsets"), 20)
+            self.k("-n", self.ns, "scale", "deployment/rate-limiter-e2e-redis", "--replicas=0")
+            eventually(lambda: not json.loads(self.k("-n", self.ns, "get", "endpoints", "rate-limiter-e2e-redis", "-o", "json")).get("subsets"), 20)
             # Endpoint 会先于进程退出被摘除；已有 Redis 连接仍可能继续工作。
-            eventually(lambda: not json.loads(self.k("-n", self.ns, "get", "pods", "-l", "app=redis", "-o", "json"))["items"], 45)
+            eventually(lambda: not json.loads(self.k("-n", self.ns, "get", "pods", "-l", "app=rate-limiter-e2e-redis", "-o", "json"))["items"], 45)
             self.run_case("FAULT-Redis停机CounterService响应", counter_response)
             self.run_case("FAULT-Redis停机网关放行", gateway_response)
 
             def startup_without_redis():
-                self.k("-n", self.ns, "rollout", "restart", "deployment/counter-service")
-                self.k("-n", self.ns, "rollout", "status", "deployment/counter-service", "--timeout=60s", timeout=70)
-                self.cs = self.forward("service/counter-service", 8080)[0]
+                self.k("-n", self.ns, "rollout", "restart", "deployment/rate-limiter-e2e-counter-service")
+                self.k("-n", self.ns, "rollout", "status", "deployment/rate-limiter-e2e-counter-service", "--timeout=60s", timeout=70)
+                self.cs = self.forward("service/rate-limiter-e2e-counter-service", 8080)[0]
                 conn = http.client.HTTPConnection("127.0.0.1", self.cs, timeout=10)
                 try:
-                    conn.request("GET", "/wasm/rate-limiter.wasm")
+                    conn.request("GET", "/wasm/rate-limiter-plugin.wasm")
                     response = conn.getresponse()
                     content = response.read()
-                    expected = (Path(self.args.artifacts) / "rate-limiter.wasm").read_bytes()
+                    expected = (Path(self.args.artifacts) / "rate-limiter-plugin.wasm").read_bytes()
                     check(response.status == 200 and content == expected, "Redis 停机时 Wasm 下载失败或内容不一致")
                 finally:
                     conn.close()
@@ -865,8 +867,8 @@ class Suite:
                 return "Redis 停机时 Counter Service 可启动、Wasm 下载摘要一致，业务继续通过"
             self.run_case("FAULT-Redis不可用时冷启动下载服务", startup_without_redis)
         finally:
-            self.k("-n", self.ns, "scale", "deployment/redis", "--replicas=1")
-            self.k("-n", self.ns, "rollout", "status", "deployment/redis", "--timeout=90s", timeout=100)
+            self.k("-n", self.ns, "scale", "deployment/rate-limiter-e2e-redis", "--replicas=1")
+            self.k("-n", self.ns, "rollout", "status", "deployment/rate-limiter-e2e-redis", "--timeout=90s", timeout=100)
             # 测试 Redis 使用临时数据，恢复后重新初始化以验证恢复路径。
             eventually(lambda: self.api("/config", {"service": self.service, "port": 8080, "api_key": self.key,
                 "max_concurrent": 1, "enabled": True}, "PUT")["status"] == 200, 30)
@@ -904,7 +906,7 @@ class Suite:
                     cfg["vm_config"]["vm_id"] = name
                     remote = cfg["vm_config"]["code"]["remote"]
                     if mode == "missing_cluster":
-                        remote["http_uri"]["cluster"] = "missing-wasm-cluster"
+                        remote["http_uri"]["cluster"] = "rate-limiter-e2e-missing-wasm-cluster"
                         remote["sha256"] = hashlib.sha256(name.encode()).hexdigest()
                     elif mode in ("connection_refused", "dns_failure"):
                         cluster = name + "-download"
@@ -923,8 +925,8 @@ class Suite:
                         remote["sha256"] = hashlib.sha256(name.encode()).hexdigest()
                     elif mode in ("invalid_module", "http_timeout"):
                         path = "slow" if mode == "http_timeout" else "invalid"
-                        remote["http_uri"].update({"uri": f"http://fixture.{self.ns}.svc.cluster.local:8080/wasm/{path}.wasm",
-                                                   "cluster": "e2e-counter"})
+                        remote["http_uri"].update({"uri": f"http://rate-limiter-e2e-fixture.{self.ns}.svc.cluster.local:8080/wasm/{path}.wasm",
+                                                   "cluster": "rate-limiter-e2e-counter"})
                         remote["sha256"] = hashlib.sha256(b"not a wasm module").hexdigest()
                         if mode == "http_timeout":
                             remote["http_uri"]["timeout"] = "0.1s"
@@ -933,8 +935,8 @@ class Suite:
                     elif mode == "missing_runtime":
                         cfg["vm_config"]["runtime"] = "envoy.wasm.runtime.missing"
                     else:
-                        remote["http_uri"].update({"uri": f"http://fixture.{self.ns}.svc.cluster.local:8080/wasm/fault.wasm",
-                                                   "cluster": "e2e-counter"})
+                        remote["http_uri"].update({"uri": f"http://rate-limiter-e2e-fixture.{self.ns}.svc.cluster.local:8080/wasm/fault.wasm",
+                                                   "cluster": "rate-limiter-e2e-counter"})
                         remote["sha256"] = hashlib.sha256(Path(self.args.fault_wasm).read_bytes()).hexdigest()
                         cfg["configuration"]["value"] = mode
             self.k("apply", "-f", "-", data={"apiVersion": "v1", "kind": "List", "items": resources})
@@ -993,9 +995,9 @@ class Suite:
 
             def cold_start():
                 apply_failure("missing_cluster")
-                self.k("-n", self.ns, "rollout", "restart", "deployment/e2e-gateway")
-                self.k("-n", self.ns, "rollout", "status", "deployment/e2e-gateway", "--timeout=90s", timeout=100)
-                pods = json.loads(self.k("-n", self.ns, "get", "pods", "-l", "app=e2e-gateway", "-o", "json"))["items"]
+                self.k("-n", self.ns, "rollout", "restart", "deployment/rate-limiter-e2e-gateway")
+                self.k("-n", self.ns, "rollout", "status", "deployment/rate-limiter-e2e-gateway", "--timeout=90s", timeout=100)
+                pods = json.loads(self.k("-n", self.ns, "get", "pods", "-l", "app=rate-limiter-e2e-gateway", "-o", "json"))["items"]
                 self.pods = sorted(p["metadata"]["name"] for p in pods if not p["metadata"].get("deletionTimestamp"))
                 self.gw = [self.forward("pod/" + p, 8080, 15090, 15000) for p in self.pods]
                 eventually(assert_pass_through, 30)
@@ -1015,8 +1017,8 @@ class Suite:
         for i, pod in enumerate(self.pods):
             self.save(pod + ".log", self.k("-n", self.ns, "logs", pod, "--tail=1000"))
             self.save(pod + "-config.json", request(self.gw[i][2], "/config_dump")["raw"])
-            self.save(pod + "-stats.txt", request(self.gw[i][2], "/stats?filter=wasm|e2e-counter")["raw"])
-        self.save("counter-service.log", self.k("-n", self.ns, "logs", "deployment/counter-service", "--tail=1000"))
+            self.save(pod + "-stats.txt", request(self.gw[i][2], "/stats?filter=wasm|rate-limiter-e2e-counter")["raw"])
+        self.save("counter-service.log", self.k("-n", self.ns, "logs", "deployment/rate-limiter-e2e-counter-service", "--tail=1000"))
 
     def finish(self):
         self.pool.shutdown(wait=True)
@@ -1110,7 +1112,7 @@ def main():
                     suite.save("failure-" + resource + ".txt", suite.k("-n", suite.ns, "get", resource, "-o", "wide"))
                 except Exception:
                     pass
-            for deployment in ("e2e-gateway", "counter-service", "fixture"):
+            for deployment in ("rate-limiter-e2e-gateway", "rate-limiter-e2e-counter-service", "rate-limiter-e2e-fixture"):
                 try:
                     suite.save("failure-" + deployment + ".log", suite.k("-n", suite.ns, "logs",
                                "deployment/" + deployment, "--all-pods=true", "--tail=200"))

@@ -1,4 +1,4 @@
 *
-!counter-service
-!rate-limiter.wasm
-!token-stats.wasm
+!rate-limiter-counter-service
+!rate-limiter-plugin.wasm
+!rate-limiter-token-stats.wasm

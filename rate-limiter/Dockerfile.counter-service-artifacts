@@ -2,6 +2,6 @@
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates
 WORKDIR /root/
-COPY counter-service rate-limiter.wasm token-stats.wasm ./
+COPY rate-limiter-counter-service rate-limiter-plugin.wasm rate-limiter-token-stats.wasm ./
 EXPOSE 8080
-CMD ["./counter-service"]
+CMD ["./rate-limiter-counter-service"]

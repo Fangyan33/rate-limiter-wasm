@@ -3,7 +3,7 @@ FROM golang:1.22-alpine AS builder
 RUN go env -w GOPROXY=https://goproxy.cn,direct
 WORKDIR /app
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -buildvcs=false -o counter-service ./rate-limiter/cmd/counter-service
+RUN CGO_ENABLED=0 GOOS=linux go build -buildvcs=false -o rate-limiter-counter-service ./rate-limiter/cmd/counter-service
 
 #RUN wget https://github.com/tinygo-org/tinygo/releases/download/v0.40.1/tinygo_0.40.1_amd64.deb && sudo dpkg -i tinygo_0.40.1_amd64.deb
 FROM tinygo/tinygo:0.40.1 AS wasm-builder
@@ -16,9 +16,9 @@ RUN ./build.sh
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates
 WORKDIR /root/
-COPY --from=builder /app/counter-service .
-COPY --from=wasm-builder /app/dist/token-stats.wasm ./token-stats.wasm
-COPY --from=wasm-builder /app/dist/rate-limiter.wasm ./rate-limiter.wasm
+COPY --from=builder /app/rate-limiter-counter-service .
+COPY --from=wasm-builder /app/dist/rate-limiter-token-stats.wasm ./rate-limiter-token-stats.wasm
+COPY --from=wasm-builder /app/dist/rate-limiter-plugin.wasm ./rate-limiter-plugin.wasm
 
 EXPOSE 8080
-CMD ["./counter-service"]
+CMD ["./rate-limiter-counter-service"]
