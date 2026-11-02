@@ -19,6 +19,7 @@ const (
 )
 
 type Config struct {
+	Domains          DomainPatterns         `yaml:"domains"`
 	DistributedLimit DistributedLimitConfig `yaml:"distributed_limit"`
 	ErrorResponse    ErrorResponse          `yaml:"error_response"`
 }
@@ -127,6 +128,13 @@ func (c *Config) applyDefaults() {
 }
 
 func (c *Config) Validate() error {
+	for i, pattern := range c.Domains {
+		normalized, err := normalizeDomainPattern(pattern)
+		if err != nil {
+			return fmt.Errorf("domains[%d]: %w", i, err)
+		}
+		c.Domains[i] = normalized
+	}
 	if c.DistributedLimit.Enabled {
 		if strings.TrimSpace(c.DistributedLimit.Backend) != "counter_service" {
 			return fmt.Errorf("distributed_limit.backend must be counter_service when enabled")

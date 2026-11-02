@@ -8,11 +8,27 @@
 
 额度身份是 `service + port + API Key`：service仅支持小写的 `命名空间/Service名称`，例如 `ai/inference`；port为必填的Service端口（1～65535整数），不是Pod的targetPort。不同命名空间、服务、端口的额度隔离；多个入口域名和同服务的不同subset共享额度。
 
-Wasm在请求头阶段读取Envoy的 `cluster_name` 属性，原样发送，不解析服务名称，不查询Kubernetes API或DNS。没有域名白名单，也没有本地限流模式。关闭分布式限流时透传；读取失败、空目标或超过1024字节时直接放行。
+Wasm先执行可选的入口Host过滤，再在请求头阶段读取Envoy的 `cluster_name` 属性，原样发送，不解析服务名称，不查询Kubernetes API或DNS。入口Host只决定是否进入分布式限流，不改变额度身份；没有本地限流模式。关闭分布式限流时透传；读取失败、空目标或超过1024字节时直接放行。
 
 Counter Service识别 `outbound|port|subset|service.namespace.svc.<集群域>`，转换为namespace/name和port，忽略subset。`KUBERNETES_CLUSTER_DOMAIN`默认 `cluster.local`，可设置其他集群域；配置非法时记录日志并停用服务识别，HTTP服务和Wasm下载仍可用。不支持的cluster或非Kubernetes目标返回 `{"allowed":true}`，不访问Redis、不分配租约。
 
 VirtualService可以填写短名称或FQDN；短名称的namespace由VirtualService自身所在namespace决定，实际匹配使用Istio解析后的目标，与入口Host无关。
+
+## Wasm Host前置过滤
+
+顶层可选字段 `domains` 只在Wasm内生效，不发送给Counter Service：
+
+```yaml
+domains:
+  - api.example.com
+  - "*.example.org"
+```
+
+省略、null或空列表表示不按Host过滤，保留原有调用行为。非空列表按任意一项匹配：支持精确域名和 `*.` 子域通配，后者匹配各级子域，不包含根域。多个匹配Host指向同一Service端口时继续共享额度。
+
+优先读取请求 `:authority`，缺失或为空时回退到 `Host`；配置项和请求均忽略大小写、端口及末尾的域名点。不读取转发头、不查询DNS。启用过滤后，未命中、Host缺失或无法解析时直接转发，不暂停请求、不创建租约、不发送acquire/renew/release。
+
+空条目、非法类型、不支持的星号位置及正则语法视为配置错误，禁用限流并记录日志，插件启动仍成功。配置更新仅影响后续请求，在途租约继续按原配置续约和释放。ECDS、故障放行及有效策略拒绝的语义保持不变。
 
 ## 规则与额度池
 

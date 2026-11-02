@@ -3,10 +3,12 @@ package plugin
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"rate-limiter-wasm/rate-limiter/internal/config"
 	"rate-limiter-wasm/shared/auth"
+	"rate-limiter-wasm/shared/matcher"
 
 	proxywasm "github.com/tetratelabs/proxy-wasm-go-sdk/proxywasm"
 	types "github.com/tetratelabs/proxy-wasm-go-sdk/proxywasm/types"
@@ -19,6 +21,7 @@ type vmContext struct {
 type rootContext struct {
 	types.DefaultPluginContext
 	cfg              config.Config
+	domainMatcher    *matcher.DomainMatcher
 	counterService   config.CounterServiceConfig
 	asyncDistributed bool
 	activeLeases     map[string]*activeLease
@@ -90,8 +93,16 @@ func (r *rootContext) LoadConfiguration(data []byte) error {
 	if err != nil {
 		return fmt.Errorf("load configuration: %w", err)
 	}
+	var domainMatcher *matcher.DomainMatcher
+	if len(cfg.Domains) > 0 {
+		domainMatcher, err = matcher.NewDomainMatcher(cfg.Domains)
+		if err != nil {
+			return fmt.Errorf("build domain matcher: %w", err)
+		}
+	}
 
 	r.cfg = cfg
+	r.domainMatcher = domainMatcher
 	r.counterService = cfg.DistributedLimit.CounterService
 	r.asyncDistributed = cfg.DistributedLimit.Enabled &&
 		cfg.DistributedLimit.Backend == "counter_service"
@@ -107,6 +118,7 @@ func (r *rootContext) LoadConfiguration(data []byte) error {
 
 func (r *rootContext) disable() {
 	r.cfg = config.Config{}
+	r.domainMatcher = nil
 	r.asyncDistributed = false
 }
 
@@ -135,6 +147,15 @@ func (h *httpContext) OnHttpRequestHeaders(numHeaders int, endOfStream bool) (ac
 	}()
 	if h.root == nil || !h.root.asyncDistributed || !h.root.renewalReady {
 		return types.ActionContinue
+	}
+	if h.root.domainMatcher != nil {
+		host, err := proxywasm.GetHttpRequestHeader(":authority")
+		if err == types.ErrorStatusNotFound || (err == nil && strings.TrimSpace(host) == "") {
+			host, err = proxywasm.GetHttpRequestHeader("host")
+		}
+		if err != nil || !h.root.domainMatcher.Match(config.NormalizeHost(host)) {
+			return types.ActionContinue
+		}
 	}
 
 	cluster, err := proxywasm.GetProperty([]string{"cluster_name"})

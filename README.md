@@ -67,15 +67,20 @@ docker load -i counter-service-image.tar
 
 `rate-limiter` 按 Kubernetes Service 控制并发，维度为 `命名空间/Service名称 + Service端口 + API Key`。多个入口域名指向同一服务端口时共享额度；不同命名空间、服务或端口的额度隔离。同一服务的不同 subset 共享额度。
 
-Wasm 在请求头阶段读取 Envoy 路由已经选中的 `cluster_name`，发送给 Counter Service。Counter Service 解析服务和端口，再通过 Redis Lua 原子选择规则、清理过期成员和分配租约。请求执行期间由 Wasm 续约，流结束时异步释放。插件不查询 Kubernetes API，不做 DNS 解析，也不承担 API Key 认证职责。
+Wasm 在请求头阶段先按可选的 `domains` 过滤入口 Host，再读取 Envoy 路由已经选中的 `cluster_name`，发送给 Counter Service。Counter Service 解析服务和端口，再通过 Redis Lua 原子选择规则、清理过期成员和分配租约。请求执行期间由 Wasm 续约，流结束时异步释放。插件不查询 Kubernetes API，不做 DNS 解析，也不承担 API Key 认证职责。
 
-仅保留 Counter Service 分布式模式。Wasm 没有入口域名白名单和本地限流规则；`distributed_limit.enabled: false` 表示直接透传。
+仅保留 Counter Service 分布式模式。Wasm 支持入口 Host 前置过滤，没有本地限流规则；`distributed_limit.enabled: false` 表示直接透传。
 
 ### Wasm 配置
 
 实际生效配置内嵌在 `deploy/istio/rate-limiter-envoyfilter.yaml`，独立示例文件不会自动被插件读取：
 
 ```yaml
+# 省略或 [] 表示不按 Host 过滤；按需替换为域名列表。
+domains: []
+# domains:
+#   - api.example.com
+#   - "*.example.org"
 distributed_limit:
   enabled: true
   backend: counter_service
@@ -90,6 +95,10 @@ error_response:
   status_code: 429
   message: Rate limit exceeded
 ```
+
+`domains` 只决定是否调用 Counter Service，不参与额度分组。列表支持精确域名和 `*.` 子域通配，任意一项命中即可；`*.example.org` 匹配各级子域，不包含 `example.org` 本身。省略、null 或空列表保持所有请求进入限流流程。
+
+优先读取 `:authority`，缺失或为空时读取 `Host`；配置和请求均忽略大小写、端口及末尾的域名点。配置了非空列表时，未命中、缺少 Host 或 Host 无法解析均直接转发，不暂停请求、不产生限流调用。空条目、非法类型、任意位置星号和正则语法均为配置错误，记录日志并禁用限流，代理仍正常启动。
 
 `cluster` 指向 Counter Service 的 Envoy cluster，与业务上游的 cluster 不同。`timeout_ms` 控制异步 HTTP 等待，未设置或超过5000ms时使用5000ms；独立看门狗最多每100ms检查一次，恢复仍依赖 Envoy 事件循环正常运行。`lease_ttl_ms` 默认30000ms且必须为正数；续约间隔为TTL的三分之一。TTL是异常回收窗口，不是业务请求的最长时长。
 

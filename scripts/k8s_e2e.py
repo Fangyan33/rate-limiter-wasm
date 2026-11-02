@@ -78,6 +78,7 @@ class Suite:
         self.key = jwt("basic_001")
         self.key2 = jwt("premium_001")
         self.host = "api.e2e.test"
+        self.domains = None
         self.service = self.ns + "/rate-limiter-e2e-fixture"
         self.peer_ns = self.ns + "-peer"
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
@@ -197,6 +198,8 @@ class Suite:
             digest = hashlib.sha256((Path(self.args.artifacts) / wasm).read_bytes()).hexdigest()
             config = "" if plugin == "rate-limiter" else "domains:\n  - '*.e2e.test'\n"
             if plugin == "rate-limiter":
+                if self.domains is not None:
+                    config += "domains: " + json.dumps(self.domains) + "\n"
                 config += ("distributed_limit:\n  enabled: true\n  backend: counter_service\n"
                            "  counter_service:\n    cluster: rate-limiter-e2e-counter\n    acquire_path: /acquire\n"
                            "    release_path: /release\n    renew_path: /renew\n"
@@ -656,6 +659,115 @@ class Suite:
             return "上游自身429/500/503及响应体原样透传，acquire明确允许"
         self.run_case("GW-上游错误原样透传", upstream_errors)
 
+    def apply_domains(self, domains):
+        self.domains = domains
+        resource = next(item for item in self.manifest()["items"]
+                        if item["kind"] == "EnvoyFilter" and item["metadata"]["name"] == "rate-limiter-e2e-plugin")
+        self.k("apply", "-f", "-", data=resource)
+        self.save("host-filter-resource-" + str(len(self.results)) + ".json",
+                  json.loads(self.k("-n", self.ns, "get", "envoyfilter", "rate-limiter-e2e-plugin", "-o", "json")))
+        # Envoy 1.21 does not expose ECDS configurations in /config_dump.
+        # Callers wait for positive policy probes and zero-call bypass probes
+        # on both replicas, which also rules out the ECDS Lua fallback.
+
+    def domain_filter_cases(self):
+        # All tested hosts already have a valid VirtualService route. A missing
+        # acquire must be caused by the Wasm filter, never by a route miss.
+        patterns = ["API.E2E.TEST.:8080", "*.included.e2e.test"]
+
+        def occupied(fn):
+            self.config(self.service, self.key, 1)
+            self.idle()
+            lease = self.acquire(self.service, self.key, ttl=120000)["body"]["lease_id"]
+            try:
+                return fn()
+            finally:
+                self.release(lease)
+                self.idle()
+
+        def all_hosts():
+            for pod in range(2):
+                check(self.gateway(pod=pod, host="unmatched.test", key=self.key)["status"] == 429,
+                      "空过滤列表没有保留原来的限流调用")
+            return True
+
+        try:
+            for domains, label in ((None, "省略列表"), ([], "空列表")):
+                def baseline(domains=domains):
+                    self.apply_domains(domains)
+                    occupied(lambda: eventually(all_hosts, 30))
+                    return "两个副本对未筛选Host均调用acquire，并按服务额度返回429"
+                self.run_case("FILTER-" + label + "保持调用", baseline)
+
+            self.apply_domains(patterns)
+            self.assert_limiter_active()
+
+            def selected_hosts():
+                self.control(clear=True)
+                for pod in range(2):
+                    for host in (self.host, "API.E2E.TEST:8080", "a.included.e2e.test", "a.b.included.e2e.test"):
+                        check(self.gateway(pod=pod, host=host, key=self.key)["status"] == 429, host)
+                events = self.events("acquire", api_key=self.key)
+                check(len(events) == 8, events)
+                for event in events:
+                    check(set(event["request"]) == {"upstream_cluster", "api_key", "ttl_ms"}, event)
+                    check(event["request"]["upstream_cluster"] == self.cluster(), event)
+                self.save("host-filter-matched.json", events)
+                return "精确Host、大小写和端口、单级和多级子域匹配，载荷不变，超限429"
+            self.run_case("FILTER-匹配Host进入服务限流", lambda: occupied(selected_hosts))
+
+            def bypass_hosts():
+                self.control(clear=True)
+                responses = []
+                for pod in range(2):
+                    for host in ("unmatched.test", "included.e2e.test", "badincluded.e2e.test"):
+                        response = self.gateway(pod=pod, host=host, key=self.key)
+                        check(response["status"] == 200 and response["body"].get("id") == "e2e-upstream", response)
+                        responses.append({"pod": pod, "host": host, "status": response["status"]})
+                control = request(self.fixture, "/control")["body"]
+                check(not control["events"], control)
+                self.save("host-filter-bypass.json", {"responses": responses, "proxy": control})
+                return "额度占满时，未匹配Host和通配根域仍到达上游，acquire/renew/release均为0"
+            self.run_case("FILTER-未命中零限流调用", lambda: occupied(lambda: eventually(bypass_hosts, 30)))
+
+            def shared_pool():
+                self.config(self.service, self.key, 1)
+                self.control(clear=True)
+                held = self.pool.submit(self.gateway, 0, self.host, self.key, {"stream": True, "hold_seconds": 3})
+                try:
+                    eventually(lambda: self.events("acquire", api_key=self.key))
+                    check(self.gateway(pod=1, host="a.included.e2e.test", key=self.key)["status"] == 429,
+                          "匹配域名没有共享Service端口额度")
+                    check(held.result()["status"] == 200, "原流被中断")
+                finally:
+                    held.result(timeout=10)
+                    self.idle()
+                check(self.gateway(pod=1, host="a.included.e2e.test", key=self.key)["status"] == 200, "释放后未恢复")
+                self.idle()
+                self.save("host-filter-shared-quota.json", request(self.fixture, "/control")["body"])
+                return "精确和通配Host跨副本共享额度，长请求续约并释放"
+            self.run_case("FILTER-匹配域名共享额度", shared_pool)
+
+            def invalid_patterns():
+                self.apply_domains(["*."])
+                def disabled():
+                    self.control(clear=True)
+                    for pod in range(2):
+                        check(self.gateway(pod=pod, key=self.key)["status"] == 200, "非法domains阻断业务")
+                    return not self.events("acquire")
+                occupied(lambda: eventually(disabled, 30))
+                self.save("host-filter-invalid.json", request(self.fixture, "/control")["body"])
+                return "非法domains配置下额度已满仍放行，未发送acquire"
+            self.run_case("FILTER-非法配置故障放行", invalid_patterns)
+        finally:
+            # Keep a nonempty filter enabled for the complete runtime/Redis/load
+            # fault suite; normal traffic must traverse the matched-host branch.
+            self.apply_domains(patterns)
+            self.assert_limiter_active()
+            self.config(self.service, self.key, 1)
+            for i, pod in enumerate(self.pods):
+                self.save("host-filter-" + pod + "-config.json", request(self.gw[i][2], "/config_dump")["body"])
+
     def metric_cases(self):
         def json_usage():
             before = [self.metric(name, "basic_001") for name in
@@ -1099,6 +1211,7 @@ def main():
         if not args.loading_only:
             suite.counter_cases()
             suite.gateway_cases()
+            suite.domain_filter_cases()
             if not args.rate_limiter_only:
                 suite.metric_cases()
             suite.failure_cases()

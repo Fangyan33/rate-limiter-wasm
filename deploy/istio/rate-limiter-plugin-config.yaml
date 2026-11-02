@@ -1,10 +1,13 @@
 # Wasm 只读取并发送原始路由目标，Counter Service 转换服务标识。
-# 无需配置入口域名；额度通过 Counter Service 的 /config 接口管理：
+# domains 仅用于 Wasm 前置过滤；额度通过 Counter Service 的 /config 接口管理：
 # {"service":"default/nginx-file-server-svc","port":80,"api_key":"key001","max_concurrent":5,"enabled":true}
 # service 只接受 namespace/name；port 是 Service port，不是 targetPort。
 # api_key 省略或为空时，作为该服务端口的默认共享额度。
 # enabled=false 或缺失规则跳过；调用、解析和依赖故障均放行。
 # distributed_limit.enabled=false 直接透传，不执行本地限流。
+# 省略或 [] 表示不按 Host 过滤；可填写 api.example.com 或 "*.example.org"。
+# 通配符匹配各级子域，不包含根域；未命中直接转发，不调用 Counter Service。
+domains: []
 distributed_limit:
   enabled: true
   backend: counter_service

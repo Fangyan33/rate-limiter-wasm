@@ -28,7 +28,7 @@ func TestConfigDefaultsAndDisabledMode(t *testing.T) {
 	require.False(t, cfg.DistributedLimit.Enabled)
 }
 func TestInvalidAndRemovedConfiguration(t *testing.T) {
-	for _, data := range []string{"", "{", "domains: [api.example.com]", "rate_limits: []", "---\n{}\n---\n{}", "distributed_limit:\n  enabled: true", enabled + "    lease_ttl_ms: 0\n", enabled + "    renew_path: relative\n", enabled + "    timeout_ms: -1\n", enabled + "    timeout_ms: null\n", enabled + "    typo: bad\n"} {
+	for _, data := range []string{"", "{", "domains: [api-*.example.com]", "rate_limits: []", "---\n{}\n---\n{}", "distributed_limit:\n  enabled: true", enabled + "    lease_ttl_ms: 0\n", enabled + "    renew_path: relative\n", enabled + "    timeout_ms: -1\n", enabled + "    timeout_ms: null\n", enabled + "    typo: bad\n"} {
 		_, err := config.Parse([]byte(data))
 		require.Error(t, err, data)
 	}

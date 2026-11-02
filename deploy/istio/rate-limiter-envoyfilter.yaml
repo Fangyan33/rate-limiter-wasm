@@ -51,10 +51,12 @@ spec:
                       uri: http://counter-service.default.svc.cluster.local:8080/wasm/rate-limiter.wasm
                       cluster: counter-service
                       timeout: 10s
-                    sha256: 3825ae4155acefcb193a904f32eb188ca954d9aa90dcd43e13aa59f19a606e4e
+                    sha256: 0614dae778365171bc3c902710e1bf57deaaa8eb285f8e0c0330ab2455944d79
               configuration:
                 "@type": type.googleapis.com/google.protobuf.StringValue
                 value: |
+                  # 省略或 [] 保持全部进入限流；可填写 api.example.com、"*.example.org"。
+                  domains: []
                   distributed_limit:
                     enabled: true
                     backend: counter_service

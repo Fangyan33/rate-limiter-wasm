@@ -13,7 +13,7 @@ import (
 )
 
 func TestInvalidPluginConfigurationStartsInBypassMode(t *testing.T) {
-	for _, cfg := range []string{"", "{", "domains: []"} {
+	for _, cfg := range []string{"", "{", `domains: ["*."]`} {
 		t.Run(cfg, func(t *testing.T) {
 			host, reset := proxytest.NewHostEmulator(proxytest.NewEmulatorOption().
 				WithVMContext(NewVMContext()).WithPluginConfiguration([]byte(cfg)))
@@ -28,7 +28,7 @@ func TestInvalidPluginConfigurationStartsInBypassMode(t *testing.T) {
 
 func TestInvalidConfigurationDisablesPreviousRules(t *testing.T) {
 	root, host, _ := newRenewalHost(t, nil)
-	require.Error(t, root.LoadConfiguration([]byte("domains: []")))
+	require.Error(t, root.LoadConfiguration([]byte(`domains: ["*."]`)))
 	id := host.InitializeHttpContext()
 	require.Equal(t, types.ActionContinue, host.CallOnRequestHeaders(id, [][2]string{{":authority", "api.example.com"}}, false))
 	require.Empty(t, host.GetCalloutAttributesFromContext(id))

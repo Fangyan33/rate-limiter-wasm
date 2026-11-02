@@ -23,6 +23,8 @@ python3 -B scripts/k8s_e2e.py \
 
 脚本自动生成主测试命名空间和用于同名Service隔离测试的peer命名空间，结束时删除两处测试资源并停止本机 port-forward。使用 `--keep` 可保留资源调试，实际命名空间记录在 `environment.json` 和报告中。脚本比较测试前后的原有 Deployment、EnvoyFilter 和 ConfigMap 配置，结果也进入报告。
 
+Host过滤专项验证省略和空列表保持调用、精确和多级子域匹配、根域和未命中Host零限流调用、跨域名共享服务额度及非法过滤配置放行。所有过滤测试Host都具有有效业务路由；在途业务、调用记录和实际Envoy配置共同作为证据。随后在非空过滤列表下执行运行时、Redis及加载故障测试。
+
 限流专项覆盖namespace/name服务规则CRUD/分页、端口及摘要校验、拒绝domain字段、key优先及禁用回退、无规则放行、释放幂等、TTL、续约、跨副本长流、配置热更新和故障放行。路由专项检查Wasm发送真实cluster，验证短名/FQDN、多域名共享、不同Service/namespace/端口隔离、Service port与targetPort不同、subset及加权路由。Redis停机使用临时测试数据，恢复后重新创建规则。
 
 限流插件使用 ECDS、内置 Lua 透传默认配置、`fail_open: true` 和 `nack_on_code_cache_miss: true`。保留的统计清单维持原加载方式。测试会先确认真实限流已经激活，再执行策略断言，避免把默认透传当成插件正常。加载故障测试覆盖不存在的下载 Cluster、连接拒绝、DNS 失败、摘要不匹配、404、下载超时、损坏模块、非法业务配置、缺少运行时，以及无下载源时的网关冷启动。配置切换期间持续对两个副本发送请求，记录任何非 200 或连接异常。
@@ -48,6 +50,14 @@ Istio 1.13.5 中，Agent 下载失败可能将原始远程 Wasm 配置交给 Env
 退出码0表示本轮全部断言通过，1表示失败。输出包含report.md、results.json、实际manifest.json、故障响应、网关配置和日志。限流专项在Redis停机时验证直接acquire在800ms内得到内部503，网关确实收到该503并继续转发至模拟上游，返回业务200。
 
 测试租约 TTL 为 1500ms，以便快速验证续约。初始化和恢复均先创建启用规则并通过真实租约占满额度，确认两个网关返回超限429，随后释放并删除探针；缺规则和禁用规则不再用于激活检测。这些结果覆盖当前集群中的功能行为；大规模压测、长时间稳定性和真实模型服务验收仍需单独执行。
+
+## 2026-11-02 Host前置过滤验证
+
+使用 `rate-limiter-counter-service:host-filter-20261102` 在本地 `kind-kind`（API Server：`https://127.0.0.1:44129`）的隔离双副本网关完成59项测试，全部通过。精确Host、大小写与端口、多级子域匹配和跨域名共享Service端口额度均通过；额度占满时，两个副本的6次未匹配Host请求仍到达业务上游，acquire/renew/release调用记录均为0。省略或空列表保留原调用行为，非法过滤配置放行。
+
+在非空过滤列表下验证acquire异常、超时、续约和释放失败，以及Redis停机和恢复。Redis停机时，Counter Service约512ms返回503，网关约513ms返回业务200。下载、初始化、运行时trap和无下载源冷启动故障测试通过。Envoy 1.21的普通config_dump不包含ECDS扩展正文，本轮保留实际EnvoyFilter、代理配置和调用记录，并通过匹配Host的真实429与未匹配Host的零调用共同确认过滤生效。
+
+报告与证据位于 `dist/e2e/20261102-host-filter-final/`，镜像对应制品位于 `dist/host-filter-build/host-filter-20261102/linux-amd64/`。三个Go模块的全量race及Host解析边界的补充回归通过；源EnvoyFilter和发布清单摘要与构建Wasm一致，Redis故障时下载内容也已核对。主测试命名空间和peer命名空间已删除，原有Deployment/EnvoyFilter/ConfigMap配置保持一致。这些结果属于本地验证，不代表生产验收。
 
 ## 2026-10-29 服务维度验证
 
